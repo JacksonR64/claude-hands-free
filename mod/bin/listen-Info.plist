@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.read-aloud.listen</string>
+<key>CFBundleExecutable</key><string>read-aloud-listen</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+<key>CFBundleName</key><string>Read Aloud Conversation</string>
+<key>NSMicrophoneUsageDescription</key><string>Listen to your conversation and session-switching commands while the microphone is enabled. Recognition requires on-device processing.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Recognise speech on this Mac to talk to your selected Claude Code session.</string>
+</dict></plist>

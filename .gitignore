@@ -1,0 +1,7 @@
+.DS_Store
+work/
+mod/.claude-plugin/types/
+*.log
+__pycache__/
+PROGRESS.md
+SESSION_PROMPT.md
