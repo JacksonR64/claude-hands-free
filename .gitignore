@@ -5,3 +5,4 @@ mod/.claude-plugin/types/
 __pycache__/
 PROGRESS.md
 SESSION_PROMPT.md
+.serena/

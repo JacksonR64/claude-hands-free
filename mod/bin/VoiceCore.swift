@@ -1,5 +1,29 @@
 import Foundation
 
+enum PanelMode: String, CaseIterable {
+    case menuBar, edge, floating
+    var title: String { self == .menuBar ? "Menu bar" : self == .edge ? "Screen edge" : "Floating icon" }
+}
+
+// Visibility changes follow intent or a genuinely new event, never a heartbeat.
+struct PanelPresentation {
+    var mode: PanelMode = .menuBar
+    var expanded = false
+    var hidden = false
+    var lastInteraction: TimeInterval = 0
+    var seenEvents = Set<String>()
+    mutating func show(at now: TimeInterval) { hidden = false; expanded = true; lastInteraction = now }
+    mutating func hide() { hidden = true; expanded = false }
+    mutating func collapse() { expanded = false }
+    mutating func tick(events: Set<String>, now: TimeInterval, pointerInside: Bool, autoExpand: Bool, autoCollapse: Bool) {
+        let fresh = events.subtracting(seenEvents)
+        seenEvents = events
+        if autoExpand && !hidden && !fresh.isEmpty { show(at: now) }
+        if pointerInside { lastInteraction = now }
+        if autoCollapse && expanded && !pointerInside && now - lastInteraction >= 8 { collapse() }
+    }
+}
+
 enum VoiceIntent: Equatable {
     case next, previous, select(String), pause, resume, stopSpeech, stopWork, open, approve, deny, cancel, dictate(String)
 }

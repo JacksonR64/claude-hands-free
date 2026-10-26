@@ -4,7 +4,7 @@ import SwiftUI
 
 let dir = NSHomeDirectory() + "/.cache/read-aloud/conversation"
 let settingsPath = NSHomeDirectory() + "/.config/read-aloud/settings.json"
-let demo = CommandLine.arguments.contains("--demo") || Bundle.main.bundleIdentifier?.hasSuffix(".preview") == true
+let demo = CommandLine.arguments.contains("--demo") || [".preview", ".demo"].contains { Bundle.main.bundleIdentifier?.hasSuffix($0) == true }
 
 struct Request: Decodable, Identifiable {
     let id: String
@@ -60,10 +60,24 @@ func openChat(_ s: S) {
     parts.queryItems = [URLQueryItem(name: "session", value: s.local)]
     if let url = parts.url { NSWorkspace.shared.open(url) }
 }
-let prefs = UserDefaults(suiteName: "read-aloud-bar") ?? .standard
+let prefs = UserDefaults(suiteName: demo ? "read-aloud-bar.demo" : "read-aloud-bar") ?? .standard
+let panelDisabledPath = dir + "/panel-disabled"
 
 final class Store: ObservableObject {
+    @Published var mode = PanelMode(rawValue: prefs.string(forKey: "presentationMode") ?? "") ?? .menuBar
+    @Published var autoExpand = prefs.bool(forKey: "autoExpand")
+    @Published var autoCollapse = prefs.object(forKey: "autoCollapse") as? Bool ?? true
+    @Published var hoverExpand = prefs.object(forKey: "hoverExpand") as? Bool ?? true
+    @Published var edgeSide = prefs.string(forKey: "edgeSide") ?? "right"
     @Published var all: [S] = []
+    func savePresentation() {
+        prefs.set(mode.rawValue, forKey: "presentationMode")
+        prefs.set(autoExpand, forKey: "autoExpand")
+        prefs.set(autoCollapse, forKey: "autoCollapse")
+        prefs.set(hoverExpand, forKey: "hoverExpand")
+        prefs.set(edgeSide, forKey: "edgeSide")
+        (NSApp.delegate as? AppDelegate)?.presentationChanged()
+    }
     @Published var settings = loadSettings()
     @Published var activeID = ""
     @Published var activeInstance = ""
@@ -215,7 +229,7 @@ final class Store: ObservableObject {
     func answer(_ text: String, destination: SpeechDestination?, permission: Bool) {
         guard let s = validDestination(destination), let request = s.pending.first else { notice = "No matching request is waiting."; return }
         guard (request.kind == "permission") == permission else { notice = "That command doesn't match this request."; return }
-        if demo { notice = "Demo response: \(text)"; return }
+        if demo { demoEvent("quiet"); notice = "Demo response: \(text)"; return }
         do {
             try atomicJSON(["session": s.id, "instance": s.instance, "request": request.id, "text": text,
                             "ts": Date().timeIntervalSince1970 * 1000], path: "\(dir)/answer-\(request.id).json")
@@ -225,6 +239,28 @@ final class Store: ObservableObject {
     func clickAnswer(_ text: String, _ s: S) {
         guard s.id == activeID, s.instance == activeInstance else { select(s, read: false); return }
         answer(text, destination: SpeechDestination(session: s.id, instance: s.instance, request: s.pending.first?.id), permission: s.pending.first?.kind == "permission")
+    }
+    func demoSpeech(_ text: String) {
+        guard demo, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let id = UUID().uuidString
+        voice(["event": "begin", "id": id])
+        voice(["event": "final", "id": id, "text": text])
+    }
+    func demoEvent(_ kind: String) {
+        guard demo else { return }
+        if kind == "reset" { all = []; activeID = ""; activeInstance = ""; loadDemo(); return }
+        guard let original = selected ?? all.first else { return }
+        let request = Request(id: UUID().uuidString, kind: kind == "permission" ? "permission" : "question",
+            question: kind == "permission" ? "Allow this simulated action once?" : "Which calibration should we review?",
+            options: kind == "permission" ? nil : ["Grey patches", "Clear to black"],
+            detail: kind == "permission" ? #"{"command":"echo This is a simulated approval; nothing executes"}"# : nil,
+            tool: kind == "permission" ? "Bash (simulation)" : nil, multiSelect: false)
+        let waits = kind == "question" || kind == "permission"
+        let changed = S(id: original.id, instance: original.instance, local: "", name: original.name, cwd: original.cwd,
+            phase: "idle", work: waits ? kind : "idle", ts: original.ts, startedAt: original.startedAt, i: 0, n: 0,
+            text: "", ready: kind == "finished", pending: waits ? [request] : [])
+        if let index = all.firstIndex(where: { $0.id == original.id }) { all[index] = changed }
+        notice = "Demo: " + (kind == "finished" ? "work completed." : waits ? "new request." : "all quiet.")
     }
     func loadDemo() {
         let now = Date().timeIntervalSince1970 * 1000
@@ -244,6 +280,7 @@ struct StatusDot: View {
 }
 struct Card: View {
     @ObservedObject var store: Store
+    @State private var demoCommand = ""
     func state(_ s: S) -> String {
         if s.work == "permission" { return "Approval needed" }
         if s.work == "question" { return "Needs your answer" }
@@ -264,12 +301,32 @@ struct Card: View {
                     store.update { $0.voice.toggle() }
                     (NSApp.delegate as? AppDelegate)?.applyVoice()
                 } label: { Image(systemName: store.settings.voice ? "mic.fill" : "mic.slash").frame(width: 30, height: 30).background(Circle().fill(store.settings.voice ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.1))) }
-                .buttonStyle(.plain).help(store.settings.voice ? "Stop listening" : "Start hands-free conversation")
+                .buttonStyle(.plain).disabled(demo).help(demo ? "Use the simulated voice command box below" : store.settings.voice ? "Stop listening" : "Start hands-free conversation")
+                Button { (NSApp.delegate as? AppDelegate)?.hidePanel() } label: {
+                    Image(systemName: "xmark").frame(width: 20, height: 28)
+                }.buttonStyle(.plain).help("Hide until you open it again").keyboardShortcut(.escape, modifiers: [])
                 settingsMenu
             }
-            Text(store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
+            Text(demo ? "OFFLINE DEMO · no Claude usage · microphone disabled" : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             if !store.heard.isEmpty { Text(store.heard).font(.system(size: 12)).lineLimit(3).textSelection(.enabled) }
+            if demo {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("Simulate speech: next session", text: $demoCommand)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: demoCommand) { _, _ in (NSApp.delegate as? AppDelegate)?.noteInteraction() }
+                        .onSubmit { store.demoSpeech(demoCommand); demoCommand = "" }
+                    HStack {
+                        Button("Question") { store.demoEvent("question") }
+                        Button("Approval") { store.demoEvent("permission") }
+                        Button("Finished") { store.demoEvent("finished") }
+                    }.controlSize(.small)
+                    HStack {
+                        Button("All quiet") { store.demoEvent("quiet") }
+                        Button("Reset demo") { store.demoEvent("reset") }
+                    }.controlSize(.small)
+                }
+            }
             Divider()
             if store.all.isEmpty {
                 Text("Open a Claude Code session with the mod loaded. Connected sessions will appear here.")
@@ -339,6 +396,22 @@ struct Card: View {
     }
     var settingsMenu: some View {
         Menu {
+            Menu("Show as") {
+                ForEach(PanelMode.allCases, id: \.rawValue) { mode in
+                    Button((store.mode == mode ? "✓ " : "") + mode.title) { store.mode = mode; store.savePresentation() }
+                }
+            }
+            if store.mode == .edge {
+                Menu("Screen side") {
+                    Button((store.edgeSide == "left" ? "✓ " : "") + "Left") { store.edgeSide = "left"; store.savePresentation() }
+                    Button((store.edgeSide == "right" ? "✓ " : "") + "Right") { store.edgeSide = "right"; store.savePresentation() }
+                }
+            }
+            Toggle("Expand on hover", isOn: Binding(get: { store.hoverExpand }, set: { store.hoverExpand = $0; store.savePresentation() }))
+            Toggle("Collapse when idle", isOn: Binding(get: { store.autoCollapse }, set: { store.autoCollapse = $0; store.savePresentation() }))
+            Toggle("Pop up for new requests or finished work", isOn: Binding(get: { store.autoExpand }, set: { store.autoExpand = $0; store.savePresentation() }))
+            Button("Hide until I open it") { (NSApp.delegate as? AppDelegate)?.hidePanel() }
+            Divider()
             Toggle("Natural spoken rewrite", isOn: Binding(get: { store.settings.rewrite }, set: { v in store.update { $0.rewrite = v } }))
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
@@ -349,31 +422,121 @@ struct Card: View {
             Divider()
             if let s = store.selected { Button("Name this session for voice…") { store.rename(s) } }
             Button("Reset panel position") { (NSApp.delegate as? AppDelegate)?.resetPosition() }
-            Button("Quit panel") { NSApp.terminate(nil) }
+            Button("Quit · stop background relaunch") { (NSApp.delegate as? AppDelegate)?.quitPanel() }
         } label: { Image(systemName: "ellipsis").frame(width: 22, height: 28) }.menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22)
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class ConversationWindow: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+struct CompactTab: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        Button { (NSApp.delegate as? AppDelegate)?.showPanel() } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "waveform").font(.system(size: 15, weight: .semibold))
+                if store.all.contains(where: { !$0.pending.isEmpty }) { Circle().fill(.orange).frame(width: 5, height: 5) }
+            }.frame(width: store.mode == .edge ? 26 : 36, height: store.mode == .edge ? 48 : 36)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
+        }.buttonStyle(.plain).help("Open Claude Conversation")
+            .onHover { (NSApp.delegate as? AppDelegate)?.hoverCompact($0) }
+            .contextMenu {
+                Button("Open") { (NSApp.delegate as? AppDelegate)?.showPanel() }
+                Button("Hide until I open it") { (NSApp.delegate as? AppDelegate)?.hidePanel() }
+                Button("Quit · stop background relaunch") { (NSApp.delegate as? AppDelegate)?.quitPanel() }
+            }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let store = Store()
+    var presentation = PanelPresentation()
     var panel: NSPanel?
+    var compact: NSPanel?
     var hosting: NSHostingView<Card>?
+    var statusItem: NSStatusItem?
+    let popover = NSPopover()
+    var hoverTask: DispatchWorkItem?
     var voiceOffset: UInt64 = 0
+
     func applicationDidFinishLaunching(_ n: Notification) {
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 350, height: 300), styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless], backing: .buffered, defer: false)
+        let wasQuit = FileManager.default.fileExists(atPath: panelDisabledPath)
+        if !demo && !CommandLine.arguments.contains("--background") { try? FileManager.default.removeItem(atPath: panelDisabledPath) }
+        // The offline sandbox opens visibly; the real background app starts as an icon.
+        if demo { store.mode = .floating }
+        presentation.mode = store.mode
+        let p = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 350, height: 300), styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless], backing: .buffered, defer: false)
         p.level = .floating; p.collectionBehavior = [.canJoinAllSpaces]
         p.isMovableByWindowBackground = true; p.hidesOnDeactivate = false
         p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = true
         let h = NSHostingView(rootView: Card(store: store)); p.contentView = h; hosting = h; panel = p
+        let mini = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 36, height: 36), styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        mini.level = .floating; mini.collectionBehavior = [.canJoinAllSpaces]; mini.hidesOnDeactivate = false
+        mini.isOpaque = false; mini.backgroundColor = .clear; mini.hasShadow = true
+        mini.contentView = NSHostingView(rootView: CompactTab(store: store)); compact = mini
         resetPosition()
         if let x = prefs.object(forKey: "cardX") as? Double, let y = prefs.object(forKey: "cardY") as? Double,
            NSScreen.screens.contains(where: { $0.visibleFrame.contains(NSPoint(x: x, y: y)) }) { p.setFrameTopLeftPoint(NSPoint(x: x, y: y)) }
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: p, queue: .main) { _ in
-            if !demo { prefs.set(p.frame.minX, forKey: "cardX"); prefs.set(p.frame.maxY, forKey: "cardY") }
+            if self.store.mode == .floating, !demo { prefs.set(p.frame.minX, forKey: "cardX"); prefs.set(p.frame.maxY, forKey: "cardY") }
         }
+        popover.behavior = .transient; popover.delegate = self
+        popover.contentViewController = NSHostingController(rootView: Card(store: store))
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.target = self; item.button?.action = #selector(toggleStatus)
+        item.button?.setAccessibilityLabel(demo ? "Claude Conversation Demo" : "Claude Conversation")
+        statusItem = item
         store.refresh(); tick()
+        if demo || (wasQuit && !CommandLine.arguments.contains("--background")) { showPanel() }
         if store.settings.voice { applyVoice() }
         Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in self.tick() }
+    }
+
+    @objc func toggleStatus() {
+        if presentation.expanded { hidePanel() } else { showPanel() }
+    }
+    func noteInteraction() { presentation.lastInteraction = Date().timeIntervalSince1970 }
+    func showPanel() {
+        hoverTask?.cancel()
+        presentation.show(at: Date().timeIntervalSince1970)
+        renderPresentation()
+    }
+    func hidePanel() {
+        hoverTask?.cancel(); presentation.hide(); renderPresentation()
+    }
+    func hoverCompact(_ inside: Bool) {
+        hoverTask?.cancel()
+        if inside && store.hoverExpand {
+            let work = DispatchWorkItem { [weak self] in self?.showPanel() }
+            hoverTask = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        }
+    }
+    func presentationChanged() {
+        popover.performClose(nil); panel?.orderOut(nil); compact?.orderOut(nil)
+        presentation.mode = store.mode
+        presentation.show(at: Date().timeIntervalSince1970)
+        DispatchQueue.main.async { self.renderPresentation() }
+    }
+    func popoverDidClose(_ notification: Notification) { presentation.collapse() }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if CommandLine.arguments.contains("--background") { return true }
+        if !demo { try? FileManager.default.removeItem(atPath: panelDisabledPath) }
+        if demo { store.mode = .floating; presentation.mode = .floating }
+        showPanel(); return true
+    }
+    func suppressBackgroundLaunch() {
+        guard !demo else { return }
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try Data().write(to: URL(fileURLWithPath: panelDisabledPath), options: .atomic)
+        } catch { store.notice = "Couldn't remember Quit: \(error.localizedDescription)" }
+    }
+    func quitPanel() {
+        suppressBackgroundLaunch()
+        NSApp.terminate(nil)
     }
     func applyVoice() {
         guard !demo else { return }
@@ -402,20 +565,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         store.refresh(); tailVoice()
-        guard let p = panel, let h = hosting else { return }
+        let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
+        let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
+        statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Claude Conversation")
+        statusItem?.button?.image?.isTemplate = true
+        statusItem?.button?.toolTip = demo ? "Claude Conversation Demo · no Claude usage" : needsAnswer > 0 ? "\(needsAnswer) session(s) need your answer" : "Claude Conversation"
+        var events = Set(store.all.flatMap { $0.pending.map { $0.id } })
+        for s in store.all where s.ready && s.work == "idle" { events.insert("finished-\(s.id)-\(s.instance)") }
+        let mouse = NSEvent.mouseLocation
+        let inside = (panel?.isVisible == true && panel!.frame.contains(mouse))
+            || (compact?.isVisible == true && compact!.frame.contains(mouse)) || popover.isShown
+        presentation.tick(events: events, now: Date().timeIntervalSince1970, pointerInside: inside,
+            autoExpand: store.autoExpand, autoCollapse: store.autoCollapse && store.mode != .menuBar)
+        renderPresentation()
+    }
+    func renderPresentation() {
+        guard let p = panel, let mini = compact, let h = hosting else { return }
         let size = h.fittingSize
         if abs(p.frame.height - size.height) > 1 {
             let top = p.frame.maxY; p.setContentSize(size); p.setFrameTopLeftPoint(NSPoint(x: p.frame.minX, y: top))
         }
-        if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(p.frame) }) { resetPosition() }
-        p.orderFrontRegardless()
+        if presentation.mode == .menuBar {
+            p.orderOut(nil); mini.orderOut(nil)
+            if presentation.expanded && !presentation.hidden {
+                if !popover.isShown, let button = statusItem?.button { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+            } else if popover.isShown { popover.performClose(nil) }
+            return
+        }
+        if popover.isShown { popover.performClose(nil) }
+        guard !presentation.hidden else { p.orderOut(nil); mini.orderOut(nil); return }
+        let screen = mini.screen ?? p.screen ?? NSScreen.main
+        if let frame = screen?.visibleFrame {
+            if presentation.mode == .edge {
+                mini.setContentSize(NSSize(width: 26, height: 48))
+                mini.setFrameOrigin(NSPoint(x: store.edgeSide == "left" ? frame.minX + 3 : frame.maxX - 29, y: frame.midY - 24))
+                let x = store.edgeSide == "left" ? mini.frame.maxX + 5 : mini.frame.minX - p.frame.width - 5
+                let y = min(frame.maxY - p.frame.height, max(frame.minY, mini.frame.midY - p.frame.height / 2))
+                p.setFrameOrigin(NSPoint(x: x, y: y))
+            } else {
+                if !frame.intersects(p.frame) { resetPosition() }
+                mini.setContentSize(NSSize(width: 36, height: 36))
+                mini.setFrameOrigin(NSPoint(x: p.frame.maxX - 36, y: p.frame.maxY - 36))
+            }
+        }
+        if presentation.expanded {
+            mini.orderOut(nil)
+            if !p.isVisible { p.orderFrontRegardless() }
+        } else {
+            p.orderOut(nil)
+            if !mini.isVisible { mini.orderFrontRegardless() }
+        }
     }
     func resetPosition() {
         guard let p = panel, let sc = NSScreen.main else { return }
         p.setFrameTopLeftPoint(NSPoint(x: sc.visibleFrame.maxX - p.frame.width - 20, y: sc.visibleFrame.maxY - 20))
     }
     func applicationWillTerminate(_ n: Notification) {
+        suppressBackgroundLaunch()
         if store.settings.voice { store.update { $0.voice = false }; applyVoice() }
+        if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
     }
 }
 @main struct ConversationPanel {
@@ -423,6 +631,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if TESTING
         panelSelfTests()
         #else
+        if !demo && CommandLine.arguments.contains("--background") && FileManager.default.fileExists(atPath: panelDisabledPath) { return }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = AppDelegate(); app.delegate = delegate; app.run()

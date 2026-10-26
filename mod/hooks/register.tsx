@@ -238,9 +238,8 @@ async function setPhase($: any, p: string) {
 
 // the shared status card: compiled once to ~/.cache/read-aloud, started once by whichever session gets there first
 async function ensureBar($: any) {
-  const built = await $.process.run(['sh', `${$.plugin.root}/bin/build.sh`], { timeoutMs: 120000 })
-  if (built.exitCode !== 0) throw new Error(built.stderr || 'Could not compile the conversation helpers')
-  await $.process.run(['sh', '-c', 'pgrep -x read-aloud-bar >/dev/null || open -g -a "$HOME/.cache/read-aloud/ReadAloudConversation.app"'])
+  const launched = await $.process.run(['sh', `${$.plugin.root}/bin/launch-panel.sh`], { timeoutMs: 120000 })
+  if (launched.exitCode !== 0) throw new Error(launched.stderr || 'Could not start the conversation helpers')
 }
 
 // pause/resume (Option+Space, or the band's button): pausing kills the sentence, resuming repeats it after RESUME_MS

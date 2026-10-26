@@ -1,6 +1,6 @@
 {
   "name": "read-aloud",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Hands-free conversation and explicit voice switching among existing Claude Code sessions on macOS.",
   "types": "./types/index.d.ts",
   "license": "MIT",

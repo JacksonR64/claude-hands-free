@@ -1,6 +1,6 @@
 # Claude Conversation
 
-A personal macOS voice controller for existing Claude Code sessions. A floating panel shows which conversation receives your speech and which others are working or waiting for an answer.
+A personal macOS voice controller for existing Claude Code sessions. A menu-bar icon opens a panel showing which conversation receives your speech and which others are working or waiting for an answer.
 
 Built from the **read-aloud** mod, retaining its MIT license and attribution. This is an early local MVP, with no hosted service or separate model account.
 
@@ -32,7 +32,25 @@ The installer validates and compiles before replacing `~/.claude/mods/read-aloud
 
 If read-aloud was already loaded globally, run `/reload-plugins` in each Claude Code session you want to use. Otherwise load this project's `mod/` as a local plugin using a compatible host's `--plugin-dir` option. Only sessions that load the mod participate. A normal Claude/Projects chat is not a Code session and will not appear.
 
-The helper app is built at `~/.cache/read-aloud/ReadAloudConversation.app`. Open it if the panel is not already visible. Choose a session, then click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**. Existing hotkeys still use the read-aloud Accessibility permission.
+The helper app is built at `~/.cache/read-aloud/ReadAloudConversation.app`. Open it, then click its waveform icon in the menu bar. Choose a session, then click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**. Existing hotkeys still use the read-aloud Accessibility permission.
+
+## Keep it out of the way
+
+The panel's **…** menu offers three presentations:
+
+- **Menu bar** (default): a single icon; click to open or dismiss its popover.
+- **Screen edge**: a small tab on the left or right of the screen.
+- **Floating icon**: a small icon at the panel's last floating position.
+
+The two compact presentations expand on click, optionally on hover, and collapse after eight seconds without pointer or keyboard interaction. Disable hover or idle collapse in the same menu if preferred. **Pop up for new activity** is off by default; when enabled, new questions, permissions and completed replies can expand the panel once per event.
+
+**X**, Escape or **Hide** removes both the panel and compact tab until you click the menu-bar icon. Background updates do not undo Hide. **Quit · stop background relaunch** also switches the microphone off and blocks automatic launches from later session starts. To resume after Quit, explicitly open `ReadAloudConversation.app`, then use its menu-bar icon. Reload the plugin in existing sessions after installing this version so they use the updated launcher.
+
+## Test without Claude usage
+
+Open `~/.cache/read-aloud/ReadAloudDemo.app` after installation, or `work/build/ReadAloudDemo.app` after running the checks. It has a ladybird menu-bar icon and opens visibly so you can find the sandbox. It uses separate UI preferences and fake sessions; its microphone and real session IPC are disabled.
+
+Try the presentation options, Hide, hover and idle collapse. Type **next session**, **move to printers session**, or an ordinary answer into **Simulate speech**, then press Return. **Question**, **Approval**, **Finished** and **All quiet** simulate session activity. **Reset demo** restores the sample sessions. The text field exercises the transcript routing after recognition; it does not test microphone accuracy. Simulated approvals execute nothing and consume no Claude usage.
 
 ## Try it
 
@@ -61,7 +79,7 @@ Reload the plugin afterwards. Backups are local and may contain personal setting
 ## How it fits together
 
 - `mod/hooks/register.tsx`: a mod in each Code session; lifecycle state, message delivery, questions, permission requests and spoken replies.
-- `mod/bin/bar.swift`: the native SwiftUI floating panel, selection and delivery state.
+- `mod/bin/bar.swift`: the native SwiftUI menu-bar popover, compact panels, selection, simulation and delivery state.
 - `mod/bin/listen.swift`: on-device recognition and silence-based turn detection, active only with the microphone enabled.
 - `mod/bin/VoiceCore.swift`: command parsing, session matching and destination checks.
 - `mod/bin/bridge.py`: atomic IPC in a user-private directory, with instance/request binding, expiration and receipts.
@@ -70,7 +88,7 @@ The control directory `~/.cache/read-aloud/conversation/` contains session label
 
 ## Validation and current limits
 
-`sh scripts/check.sh` runs Python bridge tests, the actual Claude mod test runner, native compilation, and panel routing tests with simulated sessions. No test calls a paid model, operates a printer, or sends a task to another chat. A `--demo` launch of the panel displays simulated sessions with IPC disabled.
+`sh scripts/check.sh` runs Python bridge/launcher tests, the actual Claude mod test runner, native compilation, and panel routing/presentation tests with simulated sessions. No test calls a paid model, operates a printer, or sends a task to another chat. A `--demo` launch of the panel also enters the offline sandbox.
 
 Automated checks cover destination changes, duplicate/ambiguous names, expired sessions and commands, request-bound responses, approval denial on error, preservation of prior permission decisions, actual question result shape and idle session registration.
 

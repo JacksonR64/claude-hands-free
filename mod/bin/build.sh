@@ -29,3 +29,13 @@ if stale "$P/Contents/MacOS/read-aloud-bar" "$C/read-aloud-bar" || stale "$P/Con
   cp "$R/bin/panel-Info.plist" "$P/Contents/Info.plist"
   codesign --force --sign - "$P"
 fi
+D="$C/ReadAloudDemo.app"
+if stale "$D/Contents/MacOS/read-aloud-demo" "$C/read-aloud-bar" || stale "$D/Contents/Info.plist" "$R/bin/panel-Info.plist"; then
+  mkdir -p "$D/Contents/MacOS"
+  cp "$C/read-aloud-bar" "$D/Contents/MacOS/read-aloud-demo"
+  cp "$R/bin/panel-Info.plist" "$D/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.read-aloud.conversation.demo' "$D/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable read-aloud-demo' "$D/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Claude Conversation Demo' "$D/Contents/Info.plist"
+  codesign --force --sign - "$D"
+fi
