@@ -48,9 +48,13 @@ The two compact presentations expand on click, optionally on hover, and collapse
 
 ## Test without Claude usage
 
-Open `~/.cache/read-aloud/ReadAloudDemo.app` after installation, or `work/build/ReadAloudDemo.app` after running the checks. It has a ladybird menu-bar icon and opens visibly so you can find the sandbox. It uses separate UI preferences and fake sessions; its microphone and real session IPC are disabled.
+Open `~/.cache/read-aloud/ReadAloudDemo.app` after installation. It has a ladybird menu-bar icon and opens visibly so you can find the sandbox. It uses separate UI preferences, fake sessions, and an isolated microphone helper. Real session IPC is disabled. The microphone starts off.
 
-Try the presentation options, Hide, hover and idle collapse. Type **next session**, **move to printers session**, or an ordinary answer into **Simulate speech**, then press Return. **Question**, **Approval**, **Finished** and **All quiet** simulate session activity. **Reset demo** restores the sample sessions. The text field exercises the transcript routing after recognition; it does not test microphone accuracy. Simulated approvals execute nothing and consume no Claude usage.
+Click its microphone once and accept macOS Microphone and Speech Recognition prompts for **Conversation Demo Microphone**, if shown. After recognition starts, the Mac introduces the first fake session and asks a question aloud. Answer **grey patches** or **clear to black**; wait for its acknowledgement, then say **next session** or **move to printers session**. Say **ask me a question**, **show an approval**, **finish work**, **reset demo**, or **all quiet** to simulate activity by voice. Say **read again** to hear the selected session, **approve action** or **deny action** for a simulated permission, and **microphone off** or **stop listening** to end capture. The demo speaks confirmations and errors locally using macOS `say`; it never calls a model.
+
+The sandbox takes turns: recognition pauses during each spoken reply and resumes shortly after it finishes, preventing speaker output from becoming a user command. Wait until it has finished before answering. Voice interruption during playback is not supported in this demo; the microphone button and Quit remain available. Responses are scripted, so this tests the hands-free workflow rather than an open-ended AI conversation. On-device English recognition must be available; there is no cloud fallback.
+
+You can still type commands or ordinary answers into **Simulate speech**, then press Return, and use **Question**, **Approval**, **Finished**, **All quiet** and **Reset demo** buttons. A build-only launch from `work/build/ReadAloudDemo.app` supports typed simulation; install the helpers before testing its microphone. Simulated approvals execute nothing and consume no Claude usage.
 
 ## Try it
 
@@ -84,7 +88,7 @@ Reload the plugin afterwards. Backups are local and may contain personal setting
 - `mod/bin/VoiceCore.swift`: command parsing, session matching and destination checks.
 - `mod/bin/bridge.py`: atomic IPC in a user-private directory, with instance/request binding, expiration and receipts.
 
-The control directory `~/.cache/read-aloud/conversation/` contains session labels, current speech captions, command/response files and a local transcript-event log (`voice.log`, reset when the listener starts). This MVP does not record audio. Existing read-aloud temporary speech files still use `/tmp/read-aloud`. Quit the panel to turn its microphone off.
+The control directory `~/.cache/read-aloud/conversation/` contains session labels, current speech captions, command/response files and a local transcript-event log (`voice.log`, reset when the listener starts). The demo uses `conversation-demo/`, its own listener process and a temporary playback marker. This MVP does not record audio. Existing read-aloud temporary speech files still use `/tmp/read-aloud`. Quit the panel to turn its microphone off.
 
 ## Validation and current limits
 

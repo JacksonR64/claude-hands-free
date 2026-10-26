@@ -25,7 +25,7 @@ struct PanelPresentation {
 }
 
 enum VoiceIntent: Equatable {
-    case next, previous, select(String), pause, resume, stopSpeech, stopWork, open, approve, deny, cancel, dictate(String)
+    case next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
 }
 
 func normalized(_ text: String) -> String {
@@ -43,6 +43,8 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     case "pause", "pause speaking": return .pause
     case "resume speaking", "keep reading": return .resume
     case "stop speaking", "be quiet": return .stopSpeech
+    case "microphone off", "stop listening", "turn off the microphone": return .stopListening
+    case "read again", "repeat that", "say that again": return .readAgain
     case "stop working", "stop work", "cancel work": return .stopWork
     case "open session", "open chat", "show session": return .open
     case "approve action", "allow action": return .approve

@@ -22,6 +22,19 @@ if stale "$A/Contents/MacOS/read-aloud-listen" "$R/bin/listen.swift" || stale "$
   codesign --force --sign - "$A"
 fi
 
+# A separate sandbox process and directory cannot feed transcripts to the live helper.
+L="$C/ReadAloudDemoListen.app"
+if stale "$L/Contents/MacOS/read-aloud-demo-listen" "$A/Contents/MacOS/read-aloud-listen" || stale "$L/Contents/Info.plist" "$R/bin/listen-Info.plist"; then
+  mkdir -p "$L/Contents/MacOS"
+  cp "$A/Contents/MacOS/read-aloud-listen" "$L/Contents/MacOS/read-aloud-demo-listen"
+  cp "$R/bin/listen-Info.plist" "$L/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.read-aloud.listen.demo' "$L/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable read-aloud-demo-listen' "$L/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Conversation Demo Microphone' "$L/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :NSSpeechRecognitionUsageDescription Recognise speech on this Mac for the offline conversation demo. No speech is sent to Claude.' "$L/Contents/Info.plist"
+  codesign --force --sign - "$L"
+fi
+
 P="$C/ReadAloudConversation.app"
 if stale "$P/Contents/MacOS/read-aloud-bar" "$C/read-aloud-bar" || stale "$P/Contents/Info.plist" "$R/bin/panel-Info.plist"; then
   mkdir -p "$P/Contents/MacOS"

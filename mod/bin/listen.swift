@@ -3,7 +3,9 @@ import Speech
 import AVFoundation
 import Darwin
 
-let root = NSHomeDirectory() + "/.cache/read-aloud/conversation"
+let demo = Bundle.main.bundleIdentifier?.hasSuffix(".demo") == true
+let root = NSHomeDirectory() + "/.cache/read-aloud/conversation" + (demo ? "-demo" : "")
+let playbackMarker = root + "/demo-speaking"
 func emit(_ event: String, id: String? = nil, text: String? = nil) {
     var value: [String: Any] = ["event": event, "ts": Date().timeIntervalSince1970 * 1000]
     if let id = id { value["id"] = id }; if let text = text { value["text"] = text }
@@ -26,6 +28,7 @@ final class Listener {
     var lastChange = Date(), lastVoice = Date(), started = Date()
     var generation = 0
     var failures = 0
+    var mutedForPlayback = false
     var noiseFloor: Float = -58
     var timer: Timer?
 
@@ -74,7 +77,8 @@ final class Listener {
         started = Date(); utterance = nil; transcript = ""; lastChange = Date()
         task = recognizer?.recognitionTask(with: fresh) { [weak self] result, error in
             DispatchQueue.main.async {
-                guard let self = self, self.generation == mine else { return }
+                guard let self = self, self.generation == mine, !self.mutedForPlayback,
+                      !(demo && FileManager.default.fileExists(atPath: playbackMarker)) else { return }
                 if let result = result {
                     self.failures = 0
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -99,6 +103,16 @@ final class Listener {
         restart()
     }
     func tick() {
+        if demo && FileManager.default.fileExists(atPath: playbackMarker) {
+            if !mutedForPlayback {
+                mutedForPlayback = true; generation += 1; task?.cancel()
+                requestLock.lock(); request?.endAudio(); request = nil; requestLock.unlock()
+                if let id = utterance { emit("cancel", id: id) }
+                utterance = nil; transcript = ""
+            }
+            return
+        }
+        if mutedForPlayback { mutedForPlayback = false; restart(); return }
         if utterance != nil, Date().timeIntervalSince(lastChange) > 1.7, Date().timeIntervalSince(lastVoice) > 1.2 { finish() }
         else if Date().timeIntervalSince(started) > 45 { if utterance != nil { finish() } else { restart() } }
     }

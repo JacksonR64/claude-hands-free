@@ -3,6 +3,7 @@ import Cocoa
 import SwiftUI
 
 let dir = NSHomeDirectory() + "/.cache/read-aloud/conversation"
+let voiceDir = dir + (demo ? "-demo" : "")
 let settingsPath = NSHomeDirectory() + "/.config/read-aloud/settings.json"
 let demo = CommandLine.arguments.contains("--demo") || [".preview", ".demo"].contains { Bundle.main.bundleIdentifier?.hasSuffix($0) == true }
 
@@ -63,6 +64,43 @@ func openChat(_ s: S) {
 let prefs = UserDefaults(suiteName: demo ? "read-aloud-bar.demo" : "read-aloud-bar") ?? .standard
 let panelDisabledPath = dir + "/panel-disabled"
 
+// The sandbox takes turns so speaker output cannot become a simulated user command.
+final class DemoSpeaker {
+    var process: Process?
+    var stateChanged: ((Bool) -> Void)?
+    var failed: ((String) -> Void)?
+    let marker = voiceDir + "/demo-speaking"
+    func stop() {
+        let previous = process; process = nil
+        if previous?.isRunning == true { previous?.terminate() }
+        try? FileManager.default.removeItem(atPath: marker)
+        stateChanged?(false)
+    }
+    func speak(_ text: String) {
+        stop()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        p.arguments = ["-r", "185", "--", text]
+        p.terminationHandler = { [weak self] finished in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                guard let self = self, self.process === finished else { return }
+                self.process = nil
+                try? FileManager.default.removeItem(atPath: self.marker)
+                self.stateChanged?(false)
+                if finished.terminationStatus != 0 { self.failed?("Couldn't play the demo reply. Check the Mac's audio output.") }
+            }
+        }
+        do {
+            try atomicJSON([:], path: marker)
+            process = p; stateChanged?(true)
+            try p.run()
+        } catch {
+            stop()
+            failed?("Couldn't speak the demo reply: \(error.localizedDescription)")
+        }
+    }
+}
+
 final class Store: ObservableObject {
     @Published var mode = PanelMode(rawValue: prefs.string(forKey: "presentationMode") ?? "") ?? .menuBar
     @Published var autoExpand = prefs.bool(forKey: "autoExpand")
@@ -78,6 +116,9 @@ final class Store: ObservableObject {
         prefs.set(edgeSide, forKey: "edgeSide")
         (NSApp.delegate as? AppDelegate)?.presentationChanged()
     }
+    var demoOutput: ((String) -> Void)?
+    var voiceChanged: (() -> Void)?
+    @Published var demoSpeaking = false
     @Published var settings = loadSettings()
     @Published var activeID = ""
     @Published var activeInstance = ""
@@ -129,7 +170,13 @@ final class Store: ObservableObject {
         }
     }
     func send(_ verb: String, _ s: S, text: String = "", tracked: Bool = false) {
-        if demo { notice = "Demo: \(verb) → \(label(s))"; return }
+        if demo {
+            if verb == "read" { notice = demoSummary(s) }
+            else if verb == "reply" {
+                notice = "\(label(s)). I heard: \(text). This is a scripted demo. Say ask me a question, show an approval, or next session."
+            } else { notice = "Demo: \(verb) → \(label(s))" }
+            return
+        }
         let id = UUID().uuidString
         do {
             try atomicJSON(["id": id, "session": s.id, "instance": s.instance, "verb": verb,
@@ -174,10 +221,14 @@ final class Store: ObservableObject {
         let kind = event["event"] as? String ?? ""
         if kind == "error" {
             notice = event["text"] as? String ?? "Speech recognition failed"
-            update { $0.voice = false }; captures.removeAll(); speechIDs.removeAll(); heard = ""
+            update { $0.voice = false }; voiceChanged?(); captures.removeAll(); speechIDs.removeAll(); heard = ""
             return
         }
-        if kind == "ready" { notice = "Listening on this Mac. Speak to the selected session."; return }
+        if kind == "ready" {
+            notice = demo ? "Offline demo. " + (selected.map { demoSummary($0) } ?? "Choose a session.") + " Say microphone off to stop listening." : "Listening on this Mac. Speak to the selected session."
+            if demo { demoOutput?(notice) }
+            return
+        }
         guard let id = event["id"] as? String else { return }
         if kind == "begin" {
             speechIDs.insert(id)
@@ -193,7 +244,20 @@ final class Store: ObservableObject {
         speechIDs.remove(id)
         let destination = captures.removeValue(forKey: id)
         heard = text
-        switch voiceIntent(text, wake: settings.wake) {
+        defer { if demo { demoOutput?(notice) } }
+        let intent = voiceIntent(text, wake: settings.wake)
+        if demo, case .dictate(let message) = intent {
+            let events = ["ask me a question": "question", "show an approval": "permission", "finish work": "finished", "all quiet": "quiet", "reset demo": "reset"]
+            if let kind = events[normalized(message)] {
+                demoEvent(kind)
+                if let s = selected { notice = demoSummary(s) }
+                return
+            }
+        }
+        switch intent {
+        case .stopListening:
+            update { $0.voice = false }; voiceChanged?(); notice = "Microphone off."
+        case .readAgain: if let s = selected { send("read", s) }
         case .next: move(1)
         case .previous: move(-1)
         case .select(let name): selectNamed(name)
@@ -229,7 +293,13 @@ final class Store: ObservableObject {
     func answer(_ text: String, destination: SpeechDestination?, permission: Bool) {
         guard let s = validDestination(destination), let request = s.pending.first else { notice = "No matching request is waiting."; return }
         guard (request.kind == "permission") == permission else { notice = "That command doesn't match this request."; return }
-        if demo { demoEvent("quiet"); notice = "Demo response: \(text)"; return }
+        if demo {
+            demoEvent("quiet")
+            notice = request.kind == "permission"
+                ? "\(label(s)). Simulated action \(text == "approve action" ? "approved" : "denied"). Nothing was executed."
+                : "\(label(s)). You answered: \(text). Answer received. Say next session, or ask me a question."
+            return
+        }
         do {
             try atomicJSON(["session": s.id, "instance": s.instance, "request": request.id, "text": text,
                             "ts": Date().timeIntervalSince1970 * 1000], path: "\(dir)/answer-\(request.id).json")
@@ -245,6 +315,14 @@ final class Store: ObservableObject {
         let id = UUID().uuidString
         voice(["event": "begin", "id": id])
         voice(["event": "final", "id": id, "text": text])
+    }
+
+    func demoSummary(_ s: S) -> String {
+        if let request = s.pending.first {
+            return "\(label(s)). \(request.question) " + (request.kind == "permission" ? "This is simulated. Say approve action or deny action." : "Say grey patches or clear to black, or answer in your own words.")
+        }
+        if s.work == "working" { return "\(label(s)) is working in this demo. Say finish work to complete it, or next session." }
+        return "\(label(s)) is ready for a follow-up. Say ask me a question, show an approval, or next session."
     }
     func demoEvent(_ kind: String) {
         guard demo else { return }
@@ -301,13 +379,13 @@ struct Card: View {
                     store.update { $0.voice.toggle() }
                     (NSApp.delegate as? AppDelegate)?.applyVoice()
                 } label: { Image(systemName: store.settings.voice ? "mic.fill" : "mic.slash").frame(width: 30, height: 30).background(Circle().fill(store.settings.voice ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.1))) }
-                .buttonStyle(.plain).disabled(demo).help(demo ? "Use the simulated voice command box below" : store.settings.voice ? "Stop listening" : "Start hands-free conversation")
+                .buttonStyle(.plain).help(store.settings.voice ? "Stop listening" : demo ? "Start the offline hands-free demo" : "Start hands-free conversation")
                 Button { (NSApp.delegate as? AppDelegate)?.hidePanel() } label: {
                     Image(systemName: "xmark").frame(width: 20, height: 28)
                 }.buttonStyle(.plain).help("Hide until you open it again").keyboardShortcut(.escape, modifiers: [])
                 settingsMenu
             }
-            Text(demo ? "OFFLINE DEMO · no Claude usage · microphone disabled" : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
+            Text(demo ? (store.settings.voice ? (store.demoSpeaking ? "OFFLINE DEMO · speaking · your turn follows" : "OFFLINE DEMO · listening on this Mac") : "OFFLINE DEMO · click microphone for hands-free") : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             if !store.heard.isEmpty { Text(store.heard).font(.system(size: 12)).lineLimit(3).textSelection(.enabled) }
             if demo {
@@ -461,6 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let popover = NSPopover()
     var hoverTask: DispatchWorkItem?
     var voiceOffset: UInt64 = 0
+    let demoSpeaker = DemoSpeaker()
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let wasQuit = FileManager.default.fileExists(atPath: panelDisabledPath)
@@ -489,6 +568,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         item.button?.target = self; item.button?.action = #selector(toggleStatus)
         item.button?.setAccessibilityLabel(demo ? "Claude Conversation Demo" : "Claude Conversation")
         statusItem = item
+        store.voiceChanged = { [weak self] in self?.applyVoice() }
+        if demo {
+            demoSpeaker.stop()
+            demoSpeaker.stateChanged = { [weak self] speaking in self?.store.demoSpeaking = speaking }
+            demoSpeaker.failed = { [weak self] message in self?.store.notice = message }
+            store.demoOutput = { [weak self] text in self?.demoSpeaker.speak(text) }
+        }
         store.refresh(); tick()
         if demo || (wasQuit && !CommandLine.arguments.contains("--background")) { showPanel() }
         if store.settings.voice { applyVoice() }
@@ -539,19 +625,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.terminate(nil)
     }
     func applyVoice() {
-        guard !demo else { return }
+        let executable = demo ? "read-aloud-demo-listen" : "read-aloud-listen"
         if store.settings.voice {
-            voiceOffset = (try? FileManager.default.attributesOfItem(atPath: "\(dir)/voice.log")[.size] as? UInt64) ?? 0
-            let app = NSHomeDirectory() + "/.cache/read-aloud/ReadAloudListen.app"
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-g", "-a", app]
-            do { try p.run() } catch { store.notice = "Couldn't start the microphone helper: \(error.localizedDescription)" }
+            do {
+                try FileManager.default.createDirectory(atPath: voiceDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try? FileManager.default.removeItem(atPath: voiceDir + "/voice.log")
+                voiceOffset = 0
+                let name = demo ? "ReadAloudDemoListen.app" : "ReadAloudListen.app"
+                let app = NSHomeDirectory() + "/.cache/read-aloud/" + name
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-g", "-a", app]
+                try p.run()
+                store.notice = "Starting on-device speech recognition…"
+            } catch {
+                store.update { $0.voice = false }
+                store.notice = "Couldn't start the microphone helper: \(error.localizedDescription)"
+            }
         } else {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill"); p.arguments = ["-x", "read-aloud-listen"]; try? p.run()
+            if demo { demoSpeaker.stop() }
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill"); p.arguments = ["-x", executable]
+            if (try? p.run()) != nil { p.waitUntilExit() }
             store.captures.removeAll(); store.speechIDs.removeAll(); store.heard = ""
         }
     }
     func tailVoice() {
-        guard store.settings.voice, !demo, let h = FileHandle(forReadingAtPath: "\(dir)/voice.log") else { return }
+        guard store.settings.voice, let h = FileHandle(forReadingAtPath: "\(voiceDir)/voice.log") else { return }
         defer { try? h.close() }
         let size = h.seekToEndOfFile(); if size < voiceOffset { voiceOffset = 0 }
         h.seek(toFileOffset: voiceOffset)
@@ -622,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     func applicationWillTerminate(_ n: Notification) {
         suppressBackgroundLaunch()
+        demoSpeaker.stop()
         if store.settings.voice { store.update { $0.voice = false }; applyVoice() }
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
     }

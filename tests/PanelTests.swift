@@ -34,7 +34,15 @@ func panelSelfTests() {
     assert(visibility.expanded)
     visibility.tick(events: ["third"], now: 29, pointerInside: false, autoExpand: false, autoCollapse: true)
     assert(!visibility.expanded && !visibility.hidden)
+    assert(voiceDir != dir && voiceDir.hasSuffix("conversation-demo"), "Sandbox audio cannot enter the live transcript log")
+    assert(voiceIntent("stop listening") == .stopListening)
+    assert(voiceIntent("read again") == .readAgain)
     let store = Store(); store.loadDemo()
+    var spoken: [String] = []
+    store.demoOutput = { spoken.append($0) }
+    store.voice(["event": "ready"])
+    assert(spoken.last?.contains("Offline demo") == true)
+    assert(spoken.last?.contains("Printers") == true)
     func speak(_ text: String, beforeFinal: (() -> Void)? = nil) {
         let id = UUID().uuidString
         store.voice(["event": "begin", "id": id])
@@ -47,7 +55,7 @@ func panelSelfTests() {
     speak("Move to the printers session")
     assert(store.activeID == "printers")
     speak("Clear to black")
-    assert(store.notice == "Demo response: Clear to black")
+    assert(store.notice.contains("You answered: Clear to black"))
     assert(store.selected?.pending.isEmpty == true)
     store.demoEvent("permission")
     speak("yes")
@@ -64,5 +72,31 @@ func panelSelfTests() {
     speak("Switch to unknown session")
     assert(store.activeID == previous)
     assert(store.notice.contains("No session matches"))
+    speak("ask me a question")
+    assert(store.selected?.pending.first?.kind == "question")
+    speak("read again")
+    assert(spoken.last?.contains("Which calibration") == true)
+    speak("Grey patches")
+    assert(store.selected?.pending.isEmpty == true && spoken.last?.contains("Grey patches") == true)
+    speak("show an approval")
+    assert(store.selected?.pending.first?.kind == "permission")
+    speak("deny action")
+    assert(store.selected?.pending.isEmpty == true && spoken.last?.contains("denied") == true)
+    speak("finish work")
+    assert(store.selected?.ready == true)
+    speak("Tell me about the website")
+    assert(spoken.last?.contains("I heard: Tell me about the website") == true)
+    var microphoneStopped = false
+    store.voiceChanged = { microphoneStopped = true }
+    store.settings.voice = true
+    speak("stop listening")
+    assert(microphoneStopped && !store.settings.voice)
+    assert(spoken.last == "Microphone off.")
+    store.settings.voice = true; microphoneStopped = false
+    store.voice(["event": "error", "text": "Test permission denied"])
+    assert(microphoneStopped && !store.settings.voice)
+    let count = spoken.count
+    store.voice(["event": "final", "id": "unbound", "text": "approve action"])
+    assert(spoken.count == count, "Unbound speech must not produce a spoken response")
     print("Voice parsing, ambiguity, request identity and full panel routing checks passed")
 }
