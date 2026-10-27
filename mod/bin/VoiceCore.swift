@@ -43,7 +43,7 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     case "pause", "pause speaking": return .pause
     case "resume speaking", "keep reading": return .resume
     case "stop speaking", "be quiet": return .stopSpeech
-    case "microphone off", "stop listening", "turn off the microphone": return .stopListening
+    case "microphone off", "stop listening", "turn off the microphone", "stop demo", "end demo": return .stopListening
     case "read again", "repeat that", "say that again": return .readAgain
     case "stop working", "stop work", "cancel work": return .stopWork
     case "open session", "open chat", "show session": return .open
@@ -78,6 +78,66 @@ struct SpeechDestination: Equatable {
     let session: String
     let instance: String
     let request: String?
+}
+
+struct AudioSnapshot: Decodable {
+    let ts: Double
+    let lastBufferAt: Double
+    let db: Double
+    let peakDB: Double
+    let frames: Int
+    let input: String
+    let state: String
+}
+
+enum AudioDisplay: String, CaseIterable {
+    case waveform, captions, both
+    var title: String { rawValue.capitalized }
+}
+
+func demoTrialExpired(isDemo: Bool, listening: Bool, startedAt: Double, now: Double) -> Bool {
+    isDemo && listening && now - startedAt >= 120
+}
+
+enum MicrophonePhase {
+    case off, starting, quiet, input, recognizing, speaking, noAudio, retrying, error
+    var label: String {
+        switch self {
+        case .off: return "Microphone off"
+        case .starting: return "Starting microphone…"
+        case .quiet: return "Listening · quiet input"
+        case .input: return "Sound detected"
+        case .recognizing: return "Recognising speech…"
+        case .speaking: return "Replying · wait for your turn"
+        case .noAudio: return "No audio arriving"
+        case .retrying: return "Retrying speech recognition…"
+        case .error: return "Microphone error"
+        }
+    }
+}
+
+func normalizedInputLevel(_ db: Double) -> Double {
+    guard db.isFinite else { return 0 }
+    return min(1, max(0, (db + 65) / 45))
+}
+
+func shouldFinishSpeech(hasTranscript: Bool, unchangedFor: Double, quietFor: Double) -> Bool {
+    // Steady room noise must not hold a recognised answer until the 45-second request limit.
+    hasTranscript && unchangedFor > 0.9 && (quietFor > 0.6 || unchangedFor > 1.8)
+}
+
+func microphonePhase(enabled: Bool, speaking: Bool, recognizing: Bool, failed: Bool,
+                     startedAt: Double, snapshot: AudioSnapshot?, now: Double) -> MicrophonePhase {
+    if speaking { return .speaking }
+    if failed { return .error }
+    guard enabled else { return .off }
+    guard let audio = snapshot, now - audio.ts < 3, now >= audio.ts - 1 else {
+        return now - startedAt < 6 ? .starting : .noAudio
+    }
+    guard audio.frames > 0, now - audio.lastBufferAt < 2 else { return .noAudio }
+    if audio.state == "retrying" { return .retrying }
+    if recognizing { return .recognizing }
+    return normalizedInputLevel(audio.db) > 0.15 ? .input : .quiet
 }
 
 func destinationIsCurrent(_ destination: SpeechDestination, session: String, instance: String, request: String?) -> Bool {

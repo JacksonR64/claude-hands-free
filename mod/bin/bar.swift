@@ -67,37 +67,53 @@ let panelDisabledPath = dir + "/panel-disabled"
 // The sandbox takes turns so speaker output cannot become a simulated user command.
 final class DemoSpeaker {
     var process: Process?
+    var audioFile: URL?
     var stateChanged: ((Bool) -> Void)?
     var failed: ((String) -> Void)?
     let marker = voiceDir + "/demo-speaking"
     func stop() {
         let previous = process; process = nil
         if previous?.isRunning == true { previous?.terminate() }
+        if let file = audioFile { try? FileManager.default.removeItem(at: file) }
+        audioFile = nil
         try? FileManager.default.removeItem(atPath: marker)
         stateChanged?(false)
     }
     func speak(_ text: String) {
         stop()
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        p.arguments = ["-r", "185", "--", text]
-        p.terminationHandler = { [weak self] finished in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                guard let self = self, self.process === finished else { return }
-                self.process = nil
-                try? FileManager.default.removeItem(atPath: self.marker)
-                self.stateChanged?(false)
-                if finished.terminationStatus != 0 { self.failed?("Couldn't play the demo reply. Check the Mac's audio output.") }
+        let file = URL(fileURLWithPath: voiceDir).appendingPathComponent("reply-\(UUID().uuidString).aiff")
+        let render = Process()
+        render.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        render.arguments = ["-r", "185", "-o", file.path, "--", text]
+        render.terminationHandler = { [weak self] finished in
+            DispatchQueue.main.async {
+                guard let self = self, self.process === finished else { try? FileManager.default.removeItem(at: file); return }
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? UInt64) ?? 0
+                guard finished.terminationStatus == 0, bytes > 54 else {
+                    self.stop(); self.failed?("Speech generation failed. Captions remain available."); return
+                }
+                let player = Process()
+                player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+                player.arguments = [file.path]
+                player.terminationHandler = { [weak self] playback in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        guard let self = self, self.process === playback else { try? FileManager.default.removeItem(at: file); return }
+                        let ok = playback.terminationStatus == 0
+                        self.stop()
+                        if !ok { self.failed?("Couldn't play the demo reply. Check the Mac's audio output.") }
+                    }
+                }
+                do {
+                    self.process = player
+                    try player.run()
+                } catch { self.stop(); self.failed?("Couldn't play the demo reply: \(error.localizedDescription)") }
             }
         }
         do {
             try atomicJSON([:], path: marker)
-            process = p; stateChanged?(true)
-            try p.run()
-        } catch {
-            stop()
-            failed?("Couldn't speak the demo reply: \(error.localizedDescription)")
-        }
+            audioFile = file; process = render; stateChanged?(true)
+            try render.run()
+        } catch { stop(); failed?("Couldn't speak the demo reply: \(error.localizedDescription)") }
     }
 }
 
@@ -116,9 +132,59 @@ final class Store: ObservableObject {
         prefs.set(edgeSide, forKey: "edgeSide")
         (NSApp.delegate as? AppDelegate)?.presentationChanged()
     }
+    @Published var audioDisplay = AudioDisplay(rawValue: prefs.string(forKey: "audioDisplay") ?? "") ?? .both
+    @Published var allowInterruption = prefs.bool(forKey: "allowInterruption")
+    @Published var userCaption = ""
+    @Published var assistantCaption = ""
+    @Published var demoSecondsRemaining = 120
+    var demoStop: (() -> Void)?
+    var lastAudioRefresh = 0.0
+    func saveAudioPreferences() {
+        prefs.set(audioDisplay.rawValue, forKey: "audioDisplay")
+        prefs.set(allowInterruption, forKey: "allowInterruption")
+        guard demo else { return }
+        let marker = voiceDir + "/allow-interruption"
+        do {
+            if allowInterruption { try atomicJSON([:], path: marker) }
+            else { try? FileManager.default.removeItem(atPath: marker) }
+        } catch { notice = "Couldn't save microphone preferences: \(error.localizedDescription)" }
+    }
+    func demoSay(_ text: String) {
+        guard demo else { return }
+        assistantCaption = text
+        demoOutput?(text)
+    }
     var demoOutput: ((String) -> Void)?
     var voiceChanged: (() -> Void)?
     @Published var demoSpeaking = false
+    @Published var audio: AudioSnapshot?
+    @Published var inputHistory = Array(repeating: 0.0, count: 24)
+    @Published var voiceError = ""
+    @Published var voiceStartedAt = 0.0
+    @Published var audioPhase: MicrophonePhase = .off
+    var isSpeaking: Bool { demoSpeaking || speaking != nil }
+    var audioColor: Color {
+        switch audioPhase {
+        case .speaking: return .blue
+        case .input, .recognizing: return .green
+        case .noAudio, .error: return .red
+        case .starting, .retrying: return .orange
+        default: return .secondary
+        }
+    }
+    func refreshAudio(now: Double = Date().timeIntervalSince1970) {
+        if now - lastAudioRefresh < (audioDisplay == .captions ? 0.3 : 0.1) { return }
+        lastAudioRefresh = now
+        if settings.voice, let data = FileManager.default.contents(atPath: voiceDir + "/audio.json"),
+           let snapshot = try? JSONDecoder().decode(AudioSnapshot.self, from: data) { audio = snapshot }
+        audioPhase = microphonePhase(enabled: settings.voice, speaking: isSpeaking,
+            recognizing: !speechIDs.isEmpty, failed: !voiceError.isEmpty,
+            startedAt: voiceStartedAt, snapshot: audio, now: now)
+        guard audioDisplay != .captions else { return }
+        inputHistory.removeFirst()
+        let fresh = audio.map { now - $0.lastBufferAt < 2 && now - $0.ts < 3 } ?? false
+        inputHistory.append(settings.voice && fresh && !isSpeaking ? normalizedInputLevel(audio?.db ?? -100) : 0)
+    }
     @Published var settings = loadSettings()
     @Published var activeID = ""
     @Published var activeInstance = ""
@@ -173,7 +239,7 @@ final class Store: ObservableObject {
         if demo {
             if verb == "read" { notice = demoSummary(s) }
             else if verb == "reply" {
-                notice = "\(label(s)). I heard: \(text). This is a scripted demo. Say ask me a question, show an approval, or next session."
+                notice = "Message captured in \(label(s)). Say ask me a question or next session to continue the scripted demo."
             } else { notice = "Demo: \(verb) → \(label(s))" }
             return
         }
@@ -221,16 +287,19 @@ final class Store: ObservableObject {
         let kind = event["event"] as? String ?? ""
         if kind == "error" {
             notice = event["text"] as? String ?? "Speech recognition failed"
+            voiceError = notice
             update { $0.voice = false }; voiceChanged?(); captures.removeAll(); speechIDs.removeAll(); heard = ""
             return
         }
+        if kind == "diagnostic" { notice = event["text"] as? String ?? "Speech recognition is retrying."; return }
         if kind == "ready" {
-            notice = demo ? "Offline demo. " + (selected.map { demoSummary($0) } ?? "Choose a session.") + " Say microphone off to stop listening." : "Listening on this Mac. Speak to the selected session."
-            if demo { demoOutput?(notice) }
+            notice = demo ? "Offline demo. " + (selected.map { demoSummary($0) } ?? "Choose a session.") + "" : "Listening on this Mac. Speak to the selected session."
+            if demo { demoSay(notice) }
             return
         }
         guard let id = event["id"] as? String else { return }
         if kind == "begin" {
+            if demo && allowInterruption { demoStop?() }
             speechIDs.insert(id)
             if let s = selected { captures[id] = SpeechDestination(session: s.id, instance: s.instance, request: s.pending.first?.id) }
             if let current = speaking, current.phase == "speaking" { send("toggle", current) }
@@ -239,13 +308,14 @@ final class Store: ObservableObject {
         if kind == "cancel" { speechIDs.remove(id); captures.removeValue(forKey: id); heard = ""; return }
         guard speechIDs.contains(id) else { return }
         let text = event["text"] as? String ?? ""
-        if kind == "partial" { heard = text; return }
+        if kind == "partial" { heard = text; userCaption = text; return }
         guard kind == "final" else { return }
         speechIDs.remove(id)
         let destination = captures.removeValue(forKey: id)
-        heard = text
-        defer { if demo { demoOutput?(notice) } }
-        let intent = voiceIntent(text, wake: settings.wake)
+        heard = text; userCaption = text
+        var respond = true
+        defer { if demo && respond { demoSay(notice) } }
+        let intent = demo && normalized(text) == "stop" ? VoiceIntent.stopListening : voiceIntent(text, wake: settings.wake)
         if demo, case .dictate(let message) = intent {
             let events = ["ask me a question": "question", "show an approval": "permission", "finish work": "finished", "all quiet": "quiet", "reset demo": "reset"]
             if let kind = events[normalized(message)] {
@@ -279,7 +349,10 @@ final class Store: ObservableObject {
             if let request = s.pending.first {
                 if request.kind == "permission" { notice = "Say ‘approve action’ or ‘deny action’ for the displayed request." }
                 else { answer(message, destination: destination, permission: false) }
-            } else { send("reply", s, text: message, tracked: true) }
+            } else {
+                send("reply", s, text: message, tracked: true)
+                if demo { respond = false } // Unscripted background speech is captioned, never echoed aloud.
+            }
         }
     }
     func validDestination(_ destination: SpeechDestination?) -> S? {
@@ -297,7 +370,7 @@ final class Store: ObservableObject {
             demoEvent("quiet")
             notice = request.kind == "permission"
                 ? "\(label(s)). Simulated action \(text == "approve action" ? "approved" : "denied"). Nothing was executed."
-                : "\(label(s)). You answered: \(text). Answer received. Say next session, or ask me a question."
+                : "\(label(s)). You answered: \(text). Say next session."
             return
         }
         do {
@@ -319,10 +392,10 @@ final class Store: ObservableObject {
 
     func demoSummary(_ s: S) -> String {
         if let request = s.pending.first {
-            return "\(label(s)). \(request.question) " + (request.kind == "permission" ? "This is simulated. Say approve action or deny action." : "Say grey patches or clear to black, or answer in your own words.")
+            return "\(label(s)). \(request.question) " + (request.kind == "permission" ? "Say approve action or deny action." : "")
         }
-        if s.work == "working" { return "\(label(s)) is working in this demo. Say finish work to complete it, or next session." }
-        return "\(label(s)) is ready for a follow-up. Say ask me a question, show an approval, or next session."
+        if s.work == "working" { return "\(label(s)) is working. Say finish work, or next session." }
+        return "\(label(s)) is ready. Say ask me a question, or next session."
     }
     func demoEvent(_ kind: String) {
         guard demo else { return }
@@ -356,6 +429,65 @@ struct StatusDot: View {
     let color: Color
     var body: some View { Circle().fill(color).frame(width: 7, height: 7) }
 }
+
+struct AudioActivityView: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: store.isSpeaking ? "speaker.wave.2.fill" : "mic.fill")
+                    .symbolEffect(.pulse, isActive: store.isSpeaking && store.audioDisplay != .captions)
+                Text(store.isSpeaking && store.allowInterruption ? "Replying · speak to interrupt" : store.audioPhase.label).font(.system(size: 11, weight: .medium))
+                Spacer()
+                if store.settings.voice, let audio = store.audio, store.audioDisplay != .captions {
+                    Text("\(Int(audio.db)) dB").font(.system(size: 9, design: .monospaced)).monospacedDigit()
+                }
+            }.foregroundStyle(store.audioColor)
+            if store.audioDisplay != .captions {
+                HStack(alignment: .center, spacing: 3) {
+                    ForEach(store.inputHistory.indices, id: \.self) { index in
+                        Capsule().fill(store.audioColor.opacity(0.85)).frame(height: 3 + 20 * store.inputHistory[index])
+                    }
+                }.frame(height: 24).animation(.linear(duration: 0.1), value: store.inputHistory)
+                    .accessibilityLabel("Measured microphone input level")
+            }
+            if store.audioDisplay != .waveform {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("YOU").font(.system(size: 8, weight: .bold)).foregroundStyle(.green)
+                    Text(store.userCaption.isEmpty ? "Your words appear here." : store.userCaption)
+                        .font(.system(size: 12)).lineLimit(3).textSelection(.enabled)
+                    Text(demo ? "DEMO" : "ASSISTANT").font(.system(size: 8, weight: .bold)).foregroundStyle(.blue)
+                    Text(store.assistantCaption.isEmpty ? "Spoken replies appear here." : store.assistantCaption)
+                        .font(.system(size: 12)).lineLimit(4).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if store.settings.voice {
+                Text(store.audio?.input ?? "Waiting for microphone…").font(.system(size: 9)).foregroundStyle(.secondary)
+                if store.audioPhase == .noAudio {
+                    Text("No input: check macOS Sound settings, then restart the microphone.").font(.system(size: 10)).foregroundStyle(.red)
+                }
+            }
+            if !store.voiceError.isEmpty { Text(store.voiceError).font(.system(size: 10)).foregroundStyle(.red) }
+            if demo {
+                HStack {
+                    Button("Stop demo") { (NSApp.delegate as? AppDelegate)?.stopListening() }
+                        .keyboardShortcut(".", modifiers: .command)
+                    Spacer()
+                    Button("Quit demo") { (NSApp.delegate as? AppDelegate)?.quitPanel() }
+                }.controlSize(.small)
+                HStack {
+                    Button("Test speaker") { store.demoSay("Speaker test. If you can hear this, playback is working.") }
+                    if store.settings.voice {
+                        Button("Restart microphone") { (NSApp.delegate as? AppDelegate)?.applyVoice() }
+                    }
+                }.controlSize(.small)
+                Text(store.settings.voice ? "Auto-stop in \(store.demoSecondsRemaining)s · say “stop demo”" : "Two-minute trials · closing or hiding stops audio")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                if store.allowInterruption { Text("Voice interruption on · use headphones to prevent echo.").font(.system(size: 9)).foregroundStyle(.orange) }
+            }
+        }.padding(9).background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.07)))
+    }
+}
 struct Card: View {
     @ObservedObject var store: Store
     @State private var demoCommand = ""
@@ -385,9 +517,10 @@ struct Card: View {
                 }.buttonStyle(.plain).help("Hide until you open it again").keyboardShortcut(.escape, modifiers: [])
                 settingsMenu
             }
-            Text(demo ? (store.settings.voice ? (store.demoSpeaking ? "OFFLINE DEMO · speaking · your turn follows" : "OFFLINE DEMO · listening on this Mac") : "OFFLINE DEMO · click microphone for hands-free") : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
+            Text(demo ? (store.settings.voice ? (store.demoSpeaking ? "OFFLINE DEMO · speaking · your turn follows" : "OFFLINE DEMO · local speech · no Claude usage") : "OFFLINE DEMO · click microphone for hands-free") : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
-            if !store.heard.isEmpty { Text(store.heard).font(.system(size: 12)).lineLimit(3).textSelection(.enabled) }
+            AudioActivityView(store: store)
+
             if demo {
                 VStack(alignment: .leading, spacing: 6) {
                     TextField("Simulate speech: next session", text: $demoCommand)
@@ -474,6 +607,16 @@ struct Card: View {
     }
     var settingsMenu: some View {
         Menu {
+            Menu("Audio display") {
+                ForEach(AudioDisplay.allCases, id: \.rawValue) { display in
+                    Button((store.audioDisplay == display ? "✓ " : "") + display.title) {
+                        store.audioDisplay = display; store.saveAudioPreferences()
+                    }
+                }
+            }
+            if demo {
+                Toggle("Voice interruption (headphones)", isOn: Binding(get: { store.allowInterruption }, set: { store.allowInterruption = $0; store.saveAudioPreferences() }))
+            }
             Menu("Show as") {
                 ForEach(PanelMode.allCases, id: \.rawValue) { mode in
                     Button((store.mode == mode ? "✓ " : "") + mode.title) { store.mode = mode; store.savePresentation() }
@@ -514,7 +657,18 @@ struct CompactTab: View {
     var body: some View {
         Button { (NSApp.delegate as? AppDelegate)?.showPanel() } label: {
             VStack(spacing: 3) {
-                Image(systemName: "waveform").font(.system(size: 15, weight: .semibold))
+                if store.settings.voice && !store.isSpeaking && store.audioDisplay != .captions {
+                    HStack(spacing: 2) {
+                        ForEach(0..<5) { index in
+                            Capsule().fill(store.audioColor)
+                                .frame(width: 2, height: 3 + 13 * store.inputHistory[store.inputHistory.count - 5 + index])
+                        }
+                    }.frame(width: 18, height: 18).animation(.linear(duration: 0.1), value: store.inputHistory)
+                } else {
+                    Image(systemName: store.isSpeaking ? "speaker.wave.2.fill" : "waveform")
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(store.audioColor)
+                        .symbolEffect(.pulse, isActive: store.isSpeaking)
+                }
                 if store.all.contains(where: { !$0.pending.isEmpty }) { Circle().fill(.orange).frame(width: 5, height: 5) }
             }.frame(width: store.mode == .edge ? 26 : 36, height: store.mode == .edge ? 48 : 36)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -539,6 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let popover = NSPopover()
     var hoverTask: DispatchWorkItem?
     var voiceOffset: UInt64 = 0
+    var voiceLogIdentity: UInt64?
     let demoSpeaker = DemoSpeaker()
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -566,31 +721,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.contentViewController = NSHostingController(rootView: Card(store: store))
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.target = self; item.button?.action = #selector(toggleStatus)
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         item.button?.setAccessibilityLabel(demo ? "Claude Conversation Demo" : "Claude Conversation")
         statusItem = item
         store.voiceChanged = { [weak self] in self?.applyVoice() }
         if demo {
+            store.autoCollapse = false
+            configureDemoMenu()
             demoSpeaker.stop()
+            store.demoStop = { [weak self] in self?.demoSpeaker.stop() }
             demoSpeaker.stateChanged = { [weak self] speaking in self?.store.demoSpeaking = speaking }
             demoSpeaker.failed = { [weak self] message in self?.store.notice = message }
             store.demoOutput = { [weak self] text in self?.demoSpeaker.speak(text) }
         }
         store.refresh(); tick()
         if demo || (wasQuit && !CommandLine.arguments.contains("--background")) { showPanel() }
+        if demo { NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil) }
         if store.settings.voice { applyVoice() }
         Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in self.tick() }
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.store.refreshAudio() }
     }
 
     @objc func toggleStatus() {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            let menu = NSMenu()
+            menu.addItem(withTitle: demo ? "Show Demo" : "Show Conversation", action: #selector(showPanel), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "Stop microphone and speech", action: #selector(stopListening), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Quit", action: #selector(quitPanel), keyEquivalent: "").target = self
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            return
+        }
         if presentation.expanded { hidePanel() } else { showPanel() }
     }
     func noteInteraction() { presentation.lastInteraction = Date().timeIntervalSince1970 }
-    func showPanel() {
+    @objc func showPanel() {
         hoverTask?.cancel()
         presentation.show(at: Date().timeIntervalSince1970)
         renderPresentation()
     }
     func hidePanel() {
+        if demo { stopListening() }
         hoverTask?.cancel(); presentation.hide(); renderPresentation()
     }
     func hoverCompact(_ inside: Bool) {
@@ -606,12 +777,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         presentation.show(at: Date().timeIntervalSince1970)
         DispatchQueue.main.async { self.renderPresentation() }
     }
-    func popoverDidClose(_ notification: Notification) { presentation.collapse() }
+    func popoverDidClose(_ notification: Notification) {
+        presentation.collapse()
+        if demo { stopListening() }
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if CommandLine.arguments.contains("--background") { return true }
         if !demo { try? FileManager.default.removeItem(atPath: panelDisabledPath) }
         if demo { store.mode = .floating; presentation.mode = .floating }
-        showPanel(); return true
+        showPanel()
+        if demo { NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil) }
+        return true
     }
     func suppressBackgroundLaunch() {
         guard !demo else { return }
@@ -620,17 +796,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try Data().write(to: URL(fileURLWithPath: panelDisabledPath), options: .atomic)
         } catch { store.notice = "Couldn't remember Quit: \(error.localizedDescription)" }
     }
-    func quitPanel() {
+    @objc func quitPanel() {
         suppressBackgroundLaunch()
         NSApp.terminate(nil)
     }
+
+    @objc func stopListening() {
+        if !demo, let speech = store.speaking { store.send("stop", speech) }
+        store.update { $0.voice = false }
+        demoSpeaker.stop()
+        applyVoice()
+        store.voiceError = ""
+        store.refreshAudio()
+        store.notice = "Microphone and speech stopped."
+    }
+    func applicationDidHide(_ notification: Notification) {
+        if demo { stopListening() }
+    }
+    func configureDemoMenu() {
+        let bar = NSMenu()
+        let root = NSMenuItem()
+        let menu = NSMenu(title: "Demo")
+        menu.addItem(withTitle: "Show Demo", action: #selector(showPanel), keyEquivalent: "0").target = self
+        menu.addItem(withTitle: "Stop Demo", action: #selector(stopListening), keyEquivalent: ".").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Claude Conversation Demo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
+        root.submenu = menu; bar.addItem(root); NSApp.mainMenu = bar
+    }
     func applyVoice() {
         let executable = demo ? "read-aloud-demo-listen" : "read-aloud-listen"
+        // Always end the old reader before replacing its log, including after a failed start.
+        let stop = Process(); stop.executableURL = URL(fileURLWithPath: "/usr/bin/pkill"); stop.arguments = ["-x", executable]
+        if (try? stop.run()) != nil { stop.waitUntilExit() }
+        if demo { demoSpeaker.stop() }
+        store.captures.removeAll(); store.speechIDs.removeAll(); store.heard = ""
+        store.audio = nil; voiceLogIdentity = nil; voiceOffset = 0
         if store.settings.voice {
+            store.voiceError = ""; store.voiceStartedAt = Date().timeIntervalSince1970
+            store.demoSecondsRemaining = 120
+            store.saveAudioPreferences()
             do {
                 try FileManager.default.createDirectory(atPath: voiceDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                try? FileManager.default.removeItem(atPath: voiceDir + "/voice.log")
-                voiceOffset = 0
+                for name in ["voice.log", "audio.json"] { try? FileManager.default.removeItem(atPath: voiceDir + "/" + name) }
                 let name = demo ? "ReadAloudDemoListen.app" : "ReadAloudListen.app"
                 let app = NSHomeDirectory() + "/.cache/read-aloud/" + name
                 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-g", "-a", app]
@@ -638,18 +845,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 store.notice = "Starting on-device speech recognition…"
             } catch {
                 store.update { $0.voice = false }
-                store.notice = "Couldn't start the microphone helper: \(error.localizedDescription)"
+                store.voiceError = "Couldn't start the microphone helper: \(error.localizedDescription)"
+                store.notice = store.voiceError
             }
-        } else {
-            if demo { demoSpeaker.stop() }
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill"); p.arguments = ["-x", executable]
-            if (try? p.run()) != nil { p.waitUntilExit() }
-            store.captures.removeAll(); store.speechIDs.removeAll(); store.heard = ""
         }
+        store.refreshAudio()
     }
     func tailVoice() {
         guard store.settings.voice, let h = FileHandle(forReadingAtPath: "\(voiceDir)/voice.log") else { return }
         defer { try? h.close() }
+        let identity = (try? FileManager.default.attributesOfItem(atPath: "\(voiceDir)/voice.log")[.systemFileNumber]) as? UInt64
+        if identity != voiceLogIdentity { voiceLogIdentity = identity; voiceOffset = 0 }
         let size = h.seekToEndOfFile(); if size < voiceOffset { voiceOffset = 0 }
         h.seek(toFileOffset: voiceOffset)
         let data = h.readDataToEndOfFile()
@@ -661,7 +867,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
     func tick() {
+        let now = Date().timeIntervalSince1970
+        if demoTrialExpired(isDemo: demo, listening: store.settings.voice, startedAt: store.voiceStartedAt, now: now) {
+            stopListening()
+            store.notice = "Demo stopped after two minutes. Start it again when you are ready."
+        }
+        if demo && store.settings.voice { store.demoSecondsRemaining = max(0, 120 - Int(now - store.voiceStartedAt)) }
         store.refresh(); tailVoice()
+        if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
         let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
         let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
         statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Claude Conversation")
@@ -700,7 +913,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 let y = min(frame.maxY - p.frame.height, max(frame.minY, mini.frame.midY - p.frame.height / 2))
                 p.setFrameOrigin(NSPoint(x: x, y: y))
             } else {
-                if !frame.intersects(p.frame) { resetPosition() }
+                let x = max(frame.minX + 8, min(p.frame.minX, frame.maxX - p.frame.width - 8))
+                let y = max(frame.minY + 8, min(p.frame.minY, frame.maxY - p.frame.height - 8))
+                if p.frame.minX != x || p.frame.minY != y { p.setFrameOrigin(NSPoint(x: x, y: y)) }
                 mini.setContentSize(NSSize(width: 36, height: 36))
                 mini.setFrameOrigin(NSPoint(x: p.frame.maxX - 36, y: p.frame.maxY - 36))
             }
@@ -720,7 +935,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ n: Notification) {
         suppressBackgroundLaunch()
         demoSpeaker.stop()
-        if store.settings.voice { store.update { $0.voice = false }; applyVoice() }
+        if demo { stopListening() }
+        else if store.settings.voice { store.update { $0.voice = false }; applyVoice() }
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
     }
 }
@@ -731,7 +947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         #else
         if !demo && CommandLine.arguments.contains("--background") && FileManager.default.fileExists(atPath: panelDisabledPath) { return }
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(demo ? .regular : .accessory)
         let delegate = AppDelegate(); app.delegate = delegate; app.run()
         #endif
     }

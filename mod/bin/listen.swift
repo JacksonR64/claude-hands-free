@@ -1,4 +1,5 @@
 // On-device recognition while the user has enabled conversation mode.
+import AppKit
 import Speech
 import AVFoundation
 import Darwin
@@ -6,6 +7,7 @@ import Darwin
 let demo = Bundle.main.bundleIdentifier?.hasSuffix(".demo") == true
 let root = NSHomeDirectory() + "/.cache/read-aloud/conversation" + (demo ? "-demo" : "")
 let playbackMarker = root + "/demo-speaking"
+let interruptionMarker = root + "/allow-interruption"
 func emit(_ event: String, id: String? = nil, text: String? = nil) {
     var value: [String: Any] = ["event": event, "ts": Date().timeIntervalSince1970 * 1000]
     if let id = id { value["id"] = id }; if let text = text { value["text"] = text }
@@ -31,6 +33,11 @@ final class Listener {
     var mutedForPlayback = false
     var noiseFloor: Float = -58
     var timer: Timer?
+    var db: Float = -100, peakDB: Float = -100
+    var frames = 0
+    var lastBufferAt = 0.0
+    var recognitionState = "starting"
+    var inputName = "Default microphone"
 
     func start() {
         guard let recognizer = recognizer, recognizer.supportsOnDeviceRecognition else {
@@ -38,9 +45,13 @@ final class Listener {
         }
         guard recognizer.isAvailable else { emit("error", text: "Speech recognition is unavailable. Try again shortly."); exit(2) }
         do {
-            try engine.inputNode.setVoiceProcessingEnabled(true)
-            if #available(macOS 14.0, *) {
-                engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+            inputName = AVCaptureDevice.default(for: .audio)?.localizedName ?? "Default microphone"
+            // The demo already gates recognition during playback; voice processing can stall its input.
+            if !demo {
+                try engine.inputNode.setVoiceProcessingEnabled(true)
+                if #available(macOS 14.0, *) {
+                    engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+                }
             }
             let format = engine.inputNode.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw NSError(domain: "No microphone", code: 1) }
@@ -53,14 +64,17 @@ final class Listener {
                     var sum: Float = 0
                     for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
                     let db = 10 * log10(max(sum / Float(buffer.frameLength), 0.0000000001))
+                    let frameCount = Int(buffer.frameLength)
                     DispatchQueue.main.async {
+                        self.db = db; self.peakDB = max(self.peakDB, db)
+                        self.frames += frameCount; self.lastBufferAt = Date().timeIntervalSince1970
                         if db < self.noiseFloor + 6 { self.noiseFloor = self.noiseFloor * 0.98 + db * 0.02 }
                         if db > max(-48, min(-30, self.noiseFloor + 12)) { self.lastVoice = Date() }
                     }
                 }
             }
             engine.prepare(); try engine.start(); restart()
-            timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.tick() }
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
             emit("ready", text: "Listening on this Mac")
         } catch { emit("error", text: "Couldn't start microphone processing: \(error.localizedDescription)"); exit(3) }
     }
@@ -71,6 +85,8 @@ final class Listener {
         let fresh = SFSpeechAudioBufferRecognitionRequest()
         fresh.requiresOnDeviceRecognition = true
         fresh.shouldReportPartialResults = true
+        fresh.taskHint = .dictation
+        recognitionState = "listening"
         requestLock.lock()
         request?.endAudio(); request = fresh
         requestLock.unlock()
@@ -78,7 +94,7 @@ final class Listener {
         task = recognizer?.recognitionTask(with: fresh) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self, self.generation == mine, !self.mutedForPlayback,
-                      !(demo && FileManager.default.fileExists(atPath: playbackMarker)) else { return }
+                      !(demo && FileManager.default.fileExists(atPath: playbackMarker) && !FileManager.default.fileExists(atPath: interruptionMarker)) else { return }
                 if let result = result {
                     self.failures = 0
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -88,7 +104,9 @@ final class Listener {
                     }
                     if result.isFinal { self.finish(); return }
                 }
-                if error != nil {
+                if let error = error {
+                    self.recognitionState = "retrying"
+                    emit("diagnostic", text: "Speech recogniser: \(error.localizedDescription)")
                     if let id = self.utterance { emit("cancel", id: id) }
                     self.failures += 1
                     if self.failures >= 5 { emit("error", text: "Speech recognition stopped. Turn the microphone off and on to retry."); exit(4) }
@@ -103,7 +121,14 @@ final class Listener {
         restart()
     }
     func tick() {
-        if demo && FileManager.default.fileExists(atPath: playbackMarker) {
+        let status: [String: Any] = ["ts": Date().timeIntervalSince1970, "lastBufferAt": lastBufferAt,
+            "db": db, "peakDB": peakDB, "frames": frames, "input": inputName,
+            "state": mutedForPlayback ? "playback" : recognitionState]
+        if let data = try? JSONSerialization.data(withJSONObject: status) {
+            try? data.write(to: URL(fileURLWithPath: root + "/audio.json"), options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: root + "/audio.json")
+        }
+        if demo && FileManager.default.fileExists(atPath: playbackMarker) && !FileManager.default.fileExists(atPath: interruptionMarker) {
             if !mutedForPlayback {
                 mutedForPlayback = true; generation += 1; task?.cancel()
                 requestLock.lock(); request?.endAudio(); request = nil; requestLock.unlock()
@@ -113,21 +138,38 @@ final class Listener {
             return
         }
         if mutedForPlayback { mutedForPlayback = false; restart(); return }
-        if utterance != nil, Date().timeIntervalSince(lastChange) > 1.7, Date().timeIntervalSince(lastVoice) > 1.2 { finish() }
+        if shouldFinishSpeech(hasTranscript: utterance != nil, unchangedFor: Date().timeIntervalSince(lastChange), quietFor: Date().timeIntervalSince(lastVoice)) { finish() }
         else if Date().timeIntervalSince(started) > 45 { if utterance != nil { finish() } else { restart() } }
     }
 }
 
-try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-let lock = open(root + "/listener.lock", O_CREAT | O_RDWR, 0o600)
-guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { exit(0) }
-FileManager.default.createFile(atPath: root + "/voice.log", contents: Data(), attributes: [.posixPermissions: 0o600])
-let listener = Listener()
-SFSpeechRecognizer.requestAuthorization { status in
-    guard status == .authorized else { emit("error", text: "Allow Speech Recognition for Read Aloud Conversation in macOS Privacy settings."); exit(2) }
-    AVCaptureDevice.requestAccess(for: .audio) { allowed in
-        guard allowed else { emit("error", text: "Allow Microphone access for Read Aloud Conversation in macOS Privacy settings."); exit(3) }
-        DispatchQueue.main.async { listener.start() }
+@main struct ConversationListener {
+    static func main() throws {
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let lock = open(root + "/listener.lock", O_CREAT | O_RDWR, 0o600)
+        guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { return }
+        FileManager.default.createFile(atPath: root + "/voice.log", contents: Data(), attributes: [.posixPermissions: 0o600])
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let listener = Listener()
+
+        func authorizeMicrophone() {
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { listener.start(); return }
+            emit("diagnostic", text: "Waiting for macOS Microphone permission…")
+            AVCaptureDevice.requestAccess(for: .audio) { allowed in
+                guard allowed else { emit("error", text: "Allow Microphone access for the conversation helper in macOS Privacy settings."); exit(3) }
+                DispatchQueue.main.async { listener.start() }
+            }
+        }
+
+        DispatchQueue.main.async {
+            if SFSpeechRecognizer.authorizationStatus() == .authorized { authorizeMicrophone(); return }
+            emit("diagnostic", text: "Waiting for macOS Speech Recognition permission…")
+            SFSpeechRecognizer.requestAuthorization { status in
+                guard status == .authorized else { emit("error", text: "Allow Speech Recognition for the conversation helper in macOS Privacy settings."); exit(2) }
+                DispatchQueue.main.async { authorizeMicrophone() }
+            }
+        }
+        withExtendedLifetime(listener) { app.run() }
     }
 }
-RunLoop.main.run()

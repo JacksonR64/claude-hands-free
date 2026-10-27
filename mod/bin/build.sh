@@ -14,9 +14,9 @@ if stale "$C/read-aloud-keys" "$R/keys.swift"; then
   mv "$C/read-aloud-keys.new" "$C/read-aloud-keys"
 fi
 A="$C/ReadAloudListen.app"
-if stale "$A/Contents/MacOS/read-aloud-listen" "$R/bin/listen.swift" || stale "$A/Contents/Info.plist" "$R/bin/listen-Info.plist"; then
+if stale "$A/Contents/MacOS/read-aloud-listen" "$R/bin/listen.swift" || stale "$A/Contents/MacOS/read-aloud-listen" "$R/bin/VoiceCore.swift" || stale "$A/Contents/Info.plist" "$R/bin/listen-Info.plist"; then
   mkdir -p "$A/Contents/MacOS"
-  swiftc -O "$R/bin/listen.swift" -o "$A/Contents/MacOS/read-aloud-listen.new"
+  swiftc -O "$R/bin/VoiceCore.swift" "$R/bin/listen.swift" -o "$A/Contents/MacOS/read-aloud-listen.new"
   mv "$A/Contents/MacOS/read-aloud-listen.new" "$A/Contents/MacOS/read-aloud-listen"
   cp "$R/bin/listen-Info.plist" "$A/Contents/Info.plist"
   codesign --force --sign - "$A"
@@ -49,6 +49,7 @@ if stale "$D/Contents/MacOS/read-aloud-demo" "$C/read-aloud-bar" || stale "$D/Co
   cp "$R/bin/panel-Info.plist" "$D/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.read-aloud.conversation.demo' "$D/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable read-aloud-demo' "$D/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :LSUIElement false' "$D/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleName Claude Conversation Demo' "$D/Contents/Info.plist"
   codesign --force --sign - "$D"
 fi

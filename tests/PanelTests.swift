@@ -37,7 +37,37 @@ func panelSelfTests() {
     assert(voiceDir != dir && voiceDir.hasSuffix("conversation-demo"), "Sandbox audio cannot enter the live transcript log")
     assert(voiceIntent("stop listening") == .stopListening)
     assert(voiceIntent("read again") == .readAgain)
-    let store = Store(); store.loadDemo()
+    assert(!shouldFinishSpeech(hasTranscript: false, unchangedFor: 10, quietFor: 10))
+    assert(!shouldFinishSpeech(hasTranscript: true, unchangedFor: 0.8, quietFor: 2))
+    assert(shouldFinishSpeech(hasTranscript: true, unchangedFor: 1, quietFor: 0.7))
+    assert(!shouldFinishSpeech(hasTranscript: true, unchangedFor: 1.5, quietFor: 0))
+    assert(shouldFinishSpeech(hasTranscript: true, unchangedFor: 1.9, quietFor: 0), "Background noise must not stall a stable recognised answer")
+    assert(normalizedInputLevel(-100) == 0 && normalizedInputLevel(0) == 1)
+    assert(normalizedInputLevel(.nan) == 0)
+    let sound = AudioSnapshot(ts: 10, lastBufferAt: 10, db: -32, peakDB: -20, frames: 2048, input: "Test microphone", state: "listening")
+    func phase(_ enabled: Bool = true, _ speaking: Bool = false, _ recognizing: Bool = false,
+               _ failed: Bool = false, _ sample: AudioSnapshot? = sound, _ now: Double = 10) -> MicrophonePhase {
+        microphonePhase(enabled: enabled, speaking: speaking, recognizing: recognizing, failed: failed,
+            startedAt: 9, snapshot: sample, now: now)
+    }
+    assert(phase(false) == .off)
+    assert(phase(false, true) == .speaking, "An off confirmation can still be spoken")
+    assert(phase(true, false, false, true) == .error)
+    assert(phase(true, false, false, false, nil) == .starting)
+    assert(phase(true, false, false, false, sound, 20) == .noAudio, "Stale input must not look like a working microphone")
+    assert(phase() == .input)
+    assert(phase(true, false, true) == .recognizing)
+    let silent = AudioSnapshot(ts: 10, lastBufferAt: 10, db: -100, peakDB: -100, frames: 2048, input: "Test", state: "listening")
+    assert(phase(true, false, false, false, silent) == .quiet)
+    let noFrames = AudioSnapshot(ts: 10, lastBufferAt: 0, db: -100, peakDB: -100, frames: 0, input: "Test", state: "listening")
+    assert(phase(true, false, false, false, noFrames) == .noAudio)
+    let retry = AudioSnapshot(ts: 10, lastBufferAt: 10, db: -32, peakDB: -20, frames: 2048, input: "Test", state: "retrying")
+    assert(phase(true, false, false, false, retry) == .retrying)
+    assert(!demoTrialExpired(isDemo: true, listening: true, startedAt: 10, now: 129))
+    assert(demoTrialExpired(isDemo: true, listening: true, startedAt: 10, now: 130))
+    assert(!demoTrialExpired(isDemo: false, listening: true, startedAt: 10, now: 1000))
+    assert(!demoTrialExpired(isDemo: true, listening: false, startedAt: 10, now: 1000))
+    let store = Store(); store.loadDemo(); store.allowInterruption = false
     var spoken: [String] = []
     store.demoOutput = { spoken.append($0) }
     store.voice(["event": "ready"])
@@ -84,8 +114,20 @@ func panelSelfTests() {
     assert(store.selected?.pending.isEmpty == true && spoken.last?.contains("denied") == true)
     speak("finish work")
     assert(store.selected?.ready == true)
+    let spokenBeforeBackground = spoken.count
     speak("Tell me about the website")
-    assert(spoken.last?.contains("I heard: Tell me about the website") == true)
+    assert(store.userCaption == "Tell me about the website")
+    assert(spoken.count == spokenBeforeBackground, "Unscripted background speech must not echo aloud")
+    assert(!store.assistantCaption.isEmpty)
+    var interruptions = 0
+    store.demoStop = { interruptions += 1 }
+    store.allowInterruption = true
+    speak("read again")
+    assert(interruptions == 1)
+    store.allowInterruption = false
+    speak("read again")
+    assert(interruptions == 1, "Speaker mode must keep playback gating enabled")
+    assert(store.assistantCaption == spoken.last)
     var microphoneStopped = false
     store.voiceChanged = { microphoneStopped = true }
     store.settings.voice = true
