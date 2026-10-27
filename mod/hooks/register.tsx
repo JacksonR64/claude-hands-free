@@ -91,6 +91,11 @@ async function bridge($: any, operation: string, ...args: string[]) {
   return result.stdout
 }
 
+// the panel holds a lock while it runs; with no panel nobody can answer by voice or click, so the host's own prompt must show
+async function controllerAlive($: any) {
+  try { return (await bridge($, 'alive')).trim() === '1' } catch { return false }
+}
+
 function displayName() { return myTitle || cwd.split('/').pop() || 'Claude session' }
 
 async function publish($: any) {
@@ -466,7 +471,7 @@ export const register: Register = on => {
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     await loadSettings($)
-    if (!settings.voice || e.agentId) return next(e)
+    if (!settings.voice || e.agentId || !(await controllerAlive($))) return next(e)
     const answers: Record<string, string> = {}
     for (const question of e.questions) {
       const request = { id: instance + '-q' + (++requestCount), kind: 'question', question: question.question,
@@ -479,7 +484,7 @@ export const register: Register = on => {
     const decision = await next(e)
     if (decision.decision) return decision
     await loadSettings($)
-    if (!settings.voice) return decision
+    if (!settings.voice || !(await controllerAlive($))) return decision
     const request = { id: instance + '-p' + (++requestCount), kind: 'permission', tool: e.tool_name,
       question: 'Allow this action once?', detail: JSON.stringify(e.tool_input) }
     const answer = await waitForAnswer($, request)

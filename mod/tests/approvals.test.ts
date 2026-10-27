@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
-function stub(on: any, answer: string, voice = true, fail = false) {
+function stub(on: any, answer: string, voice = true, fail = false, alive = true) {
   on('process.run', ($: any, e: any) => {
     const args = e.argv ?? []
+    if (args.includes('alive')) return { value: { exitCode: 0, stdout: alive ? '1\n' : '0\n', stderr: '' } }
     if (args.includes('wait')) {
       if (fail) return { value: { exitCode: 1, stdout: '', stderr: 'timeout' } }
       return { value: { exitCode: 0, stdout: JSON.stringify({ text: answer }), stderr: '' } }
@@ -51,4 +52,18 @@ test('question answer returns through the actual tool result', async ($, on) => 
   stub(on, 'Grey patches')
   const result = await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'Which calibration?', header: 'Calibration', options: [{ label: 'Grey patches', description: '' }, { label: 'Clear to black', description: '' }], multiSelect: false }] })
   expect(result.result.answers).toEqual({ 'Which calibration?': 'Grey patches' })
+})
+
+test('no running controller preserves the host permission flow', async ($, on) => {
+  stub(on, 'approve action', true, false, false)
+  on('classic.PermissionRequest', () => ({}))
+  const result = await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'echo demo' } })
+  expect(result).toEqual({})
+})
+
+test('no running controller leaves a question to the host UI', async ($, on) => {
+  stub(on, 'Grey patches', true, false, false)
+  on('tool.call', () => ({ result: 'host-ui' }))
+  const result = await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'Which calibration?', header: 'Calibration', options: [{ label: 'Grey patches', description: '' }], multiSelect: false }] })
+  expect(result.result).toBe('host-ui')
 })

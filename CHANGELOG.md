@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: with voice on, questions and permission prompts waited up to five minutes on the voice bridge and then denied if no controller panel was running. The mod now checks the panel's lock (`bridge.py alive`) and leaves the prompt to the host's own UI when nobody can answer.
+
 ## 0.7.0 — 27 October 2026
 
 - Carry the working demo capture path, captions and optional headphone interruption into the live controller.

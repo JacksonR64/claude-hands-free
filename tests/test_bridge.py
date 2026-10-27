@@ -75,5 +75,19 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 
+class PanelAliveTests(unittest.TestCase):
+    def test_alive_only_while_the_panel_holds_its_lock(self):
+        import fcntl, os
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertFalse(bridge.panel_alive(root))          # no lock file: no panel
+            fd = os.open(root / "panel.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            self.assertFalse(bridge.panel_alive(root))          # file left behind by an exited panel
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertTrue(bridge.panel_alive(root))           # a running panel holds the lock
+            os.close(fd)
+            self.assertFalse(bridge.panel_alive(root))
+
+
 if __name__ == "__main__":
     unittest.main()
