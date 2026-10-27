@@ -90,6 +90,15 @@ struct AudioSnapshot: Decodable {
     let state: String
 }
 
+struct PlaybackSnapshot: Decodable {
+    let phase: String
+    let ts: Double
+}
+
+func isCurrentPlayback(_ state: PlaybackSnapshot, now: Double) -> Bool {
+    state.phase == "speaking" && now * 1000 - state.ts < 12000 && now * 1000 >= state.ts - 1000
+}
+
 enum AudioDisplay: String, CaseIterable {
     case waveform, captions, both
     var title: String { rawValue.capitalized }

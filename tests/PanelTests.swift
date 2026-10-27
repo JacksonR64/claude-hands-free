@@ -44,6 +44,10 @@ func panelSelfTests() {
     assert(shouldFinishSpeech(hasTranscript: true, unchangedFor: 1.9, quietFor: 0), "Background noise must not stall a stable recognised answer")
     assert(normalizedInputLevel(-100) == 0 && normalizedInputLevel(0) == 1)
     assert(normalizedInputLevel(.nan) == 0)
+    assert(isCurrentPlayback(PlaybackSnapshot(phase: "speaking", ts: 10_000), now: 11))
+    assert(!isCurrentPlayback(PlaybackSnapshot(phase: "paused", ts: 10_000), now: 11))
+    assert(!isCurrentPlayback(PlaybackSnapshot(phase: "speaking", ts: 10_000), now: 23), "Dead sessions cannot mute the microphone indefinitely")
+    assert(!isCurrentPlayback(PlaybackSnapshot(phase: "speaking", ts: 30_000), now: 11))
     let sound = AudioSnapshot(ts: 10, lastBufferAt: 10, db: -32, peakDB: -20, frames: 2048, input: "Test microphone", state: "listening")
     func phase(_ enabled: Bool = true, _ speaking: Bool = false, _ recognizing: Bool = false,
                _ failed: Bool = false, _ sample: AudioSnapshot? = sound, _ now: Double = 10) -> MicrophonePhase {

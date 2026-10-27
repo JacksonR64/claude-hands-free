@@ -6,3 +6,7 @@ __pycache__/
 PROGRESS.md
 SESSION_PROMPT.md
 .serena/
+.env
+.env.*
+*.pem
+*.key

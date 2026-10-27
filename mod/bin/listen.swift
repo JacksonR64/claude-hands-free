@@ -19,7 +19,23 @@ func emit(_ event: String, id: String? = nil, text: String? = nil) {
     }
 }
 
+func playbackIsActive() -> Bool {
+    if demo { return FileManager.default.fileExists(atPath: playbackMarker) }
+    let files = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
+    return files.filter { $0.hasPrefix("s-") && $0.hasSuffix(".json") }.contains { name in
+        guard let data = FileManager.default.contents(atPath: root + "/" + name),
+              let state = try? JSONDecoder().decode(PlaybackSnapshot.self, from: data) else { return false }
+        return isCurrentPlayback(state, now: Date().timeIntervalSince1970)
+    }
+}
+
 final class Listener {
+    let ownerPID: Int32? = {
+        guard let data = FileManager.default.contents(atPath: root + "/microphone-owner.json"),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Int32],
+              let pid = value["pid"], pid > 0 else { return nil }
+        return pid
+    }()
     let engine = AVAudioEngine()
     let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-GB"))
     let requestLock = NSLock()
@@ -40,19 +56,14 @@ final class Listener {
     var inputName = "Default microphone"
 
     func start() {
+        guard let pid = ownerPID, kill(pid, 0) == 0 else { exit(0) }
         guard let recognizer = recognizer, recognizer.supportsOnDeviceRecognition else {
             emit("error", text: "On-device English recognition is unavailable. Enable its language support in macOS, then try again."); exit(2)
         }
         guard recognizer.isAvailable else { emit("error", text: "Speech recognition is unavailable. Try again shortly."); exit(2) }
         do {
             inputName = AVCaptureDevice.default(for: .audio)?.localizedName ?? "Default microphone"
-            // The demo already gates recognition during playback; voice processing can stall its input.
-            if !demo {
-                try engine.inputNode.setVoiceProcessingEnabled(true)
-                if #available(macOS 14.0, *) {
-                    engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
-                }
-            }
+            // Gate known playback instead of enabling the voice-processing path that stalled capture.
             let format = engine.inputNode.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw NSError(domain: "No microphone", code: 1) }
             engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
@@ -94,7 +105,7 @@ final class Listener {
         task = recognizer?.recognitionTask(with: fresh) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self, self.generation == mine, !self.mutedForPlayback,
-                      !(demo && FileManager.default.fileExists(atPath: playbackMarker) && !FileManager.default.fileExists(atPath: interruptionMarker)) else { return }
+                      !playbackIsActive() || FileManager.default.fileExists(atPath: interruptionMarker) else { return }
                 if let result = result {
                     self.failures = 0
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -121,6 +132,7 @@ final class Listener {
         restart()
     }
     func tick() {
+        if let pid = ownerPID, kill(pid, 0) != 0 { exit(0) }
         let status: [String: Any] = ["ts": Date().timeIntervalSince1970, "lastBufferAt": lastBufferAt,
             "db": db, "peakDB": peakDB, "frames": frames, "input": inputName,
             "state": mutedForPlayback ? "playback" : recognitionState]
@@ -128,7 +140,7 @@ final class Listener {
             try? data.write(to: URL(fileURLWithPath: root + "/audio.json"), options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: root + "/audio.json")
         }
-        if demo && FileManager.default.fileExists(atPath: playbackMarker) && !FileManager.default.fileExists(atPath: interruptionMarker) {
+        if playbackIsActive() && !FileManager.default.fileExists(atPath: interruptionMarker) {
             if !mutedForPlayback {
                 mutedForPlayback = true; generation += 1; task?.cancel()
                 requestLock.lock(); request?.endAudio(); request = nil; requestLock.unlock()
@@ -152,6 +164,7 @@ final class Listener {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let listener = Listener()
+        guard let pid = listener.ownerPID, kill(pid, 0) == 0 else { return }
 
         func authorizeMicrophone() {
             if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { listener.start(); return }

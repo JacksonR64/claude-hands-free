@@ -1,5 +1,6 @@
 // Native controller for the per-session mod. No model or cloud account lives here.
 import Cocoa
+import Darwin
 import SwiftUI
 
 let dir = NSHomeDirectory() + "/.cache/read-aloud/conversation"
@@ -118,6 +119,7 @@ final class DemoSpeaker {
 }
 
 final class Store: ObservableObject {
+    @Published var showInDock = prefs.object(forKey: "showInDock") as? Bool ?? true
     @Published var mode = PanelMode(rawValue: prefs.string(forKey: "presentationMode") ?? "") ?? .menuBar
     @Published var autoExpand = prefs.bool(forKey: "autoExpand")
     @Published var autoCollapse = prefs.object(forKey: "autoCollapse") as? Bool ?? true
@@ -142,7 +144,6 @@ final class Store: ObservableObject {
     func saveAudioPreferences() {
         prefs.set(audioDisplay.rawValue, forKey: "audioDisplay")
         prefs.set(allowInterruption, forKey: "allowInterruption")
-        guard demo else { return }
         let marker = voiceDir + "/allow-interruption"
         do {
             if allowInterruption { try atomicJSON([:], path: marker) }
@@ -483,8 +484,17 @@ struct AudioActivityView: View {
                 }.controlSize(.small)
                 Text(store.settings.voice ? "Auto-stop in \(store.demoSecondsRemaining)s · say “stop demo”" : "Two-minute trials · closing or hiding stops audio")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
-                if store.allowInterruption { Text("Voice interruption on · use headphones to prevent echo.").font(.system(size: 9)).foregroundStyle(.orange) }
+            } else {
+                HStack {
+                    Button("Stop listening") { (NSApp.delegate as? AppDelegate)?.stopListening() }.keyboardShortcut(".", modifiers: .command)
+                    Spacer()
+                    Button("Quit") { (NSApp.delegate as? AppDelegate)?.quitPanel() }
+                }.controlSize(.small)
+                if store.settings.voice {
+                    Text("Listening until stopped · hiding keeps the microphone on").font(.system(size: 9)).foregroundStyle(.secondary)
+                }
             }
+            if store.allowInterruption { Text("Voice interruption on · use headphones to prevent echo.").font(.system(size: 9)).foregroundStyle(.orange) }
         }.padding(9).background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.07)))
     }
 }
@@ -614,8 +624,12 @@ struct Card: View {
                     }
                 }
             }
-            if demo {
-                Toggle("Voice interruption (headphones)", isOn: Binding(get: { store.allowInterruption }, set: { store.allowInterruption = $0; store.saveAudioPreferences() }))
+            Toggle("Voice interruption (headphones)", isOn: Binding(get: { store.allowInterruption }, set: { store.allowInterruption = $0; store.saveAudioPreferences() }))
+            if !demo {
+                Toggle("Show in Dock", isOn: Binding(get: { store.showInDock }, set: {
+                    store.showInDock = $0; prefs.set($0, forKey: "showInDock")
+                    NSApp.setActivationPolicy($0 ? .regular : .accessory)
+                }))
             }
             Menu("Show as") {
                 ForEach(PanelMode.allCases, id: \.rawValue) { mode in
@@ -697,10 +711,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let demoSpeaker = DemoSpeaker()
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        store.update { $0.voice = false }
         let wasQuit = FileManager.default.fileExists(atPath: panelDisabledPath)
         if !demo && !CommandLine.arguments.contains("--background") { try? FileManager.default.removeItem(atPath: panelDisabledPath) }
         // The offline sandbox opens visibly; the real background app starts as an icon.
         if demo { store.mode = .floating }
+        NSApp.setActivationPolicy(demo || store.showInDock ? .regular : .accessory)
+        configureDemoMenu()
         presentation.mode = store.mode
         let p = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 350, height: 300), styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless], backing: .buffered, defer: false)
         p.level = .floating; p.collectionBehavior = [.canJoinAllSpaces]
@@ -727,7 +744,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.voiceChanged = { [weak self] in self?.applyVoice() }
         if demo {
             store.autoCollapse = false
-            configureDemoMenu()
             demoSpeaker.stop()
             store.demoStop = { [weak self] in self?.demoSpeaker.stop() }
             demoSpeaker.stateChanged = { [weak self] speaking in self?.store.demoSpeaking = speaking }
@@ -735,9 +751,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             store.demoOutput = { [weak self] text in self?.demoSpeaker.speak(text) }
         }
         store.refresh(); tick()
-        if demo || (wasQuit && !CommandLine.arguments.contains("--background")) { showPanel() }
-        if demo { NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil) }
-        if store.settings.voice { applyVoice() }
+        if demo || !CommandLine.arguments.contains("--background") || wasQuit { showWindow() }
+        applyVoice()
         Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in self.tick() }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.store.refreshAudio() }
     }
@@ -745,7 +760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc func toggleStatus() {
         if NSApp.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
-            menu.addItem(withTitle: demo ? "Show Demo" : "Show Conversation", action: #selector(showPanel), keyEquivalent: "").target = self
+            menu.addItem(withTitle: demo ? "Show Demo" : "Show Conversation", action: #selector(showWindow), keyEquivalent: "").target = self
             menu.addItem(withTitle: "Stop microphone and speech", action: #selector(stopListening), keyEquivalent: "").target = self
             menu.addItem(.separator())
             menu.addItem(withTitle: "Quit", action: #selector(quitPanel), keyEquivalent: "").target = self
@@ -759,6 +774,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         hoverTask?.cancel()
         presentation.show(at: Date().timeIntervalSince1970)
         renderPresentation()
+    }
+
+    @objc func showWindow() {
+        // An explicit app/Dock launch must recover a window even if menu-bar space is exhausted.
+        store.mode = .floating; presentation.mode = .floating
+        showPanel(); NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil)
     }
     func hidePanel() {
         if demo { stopListening() }
@@ -782,11 +803,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if demo { stopListening() }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if CommandLine.arguments.contains("--background") { return true }
         if !demo { try? FileManager.default.removeItem(atPath: panelDisabledPath) }
-        if demo { store.mode = .floating; presentation.mode = .floating }
-        showPanel()
-        if demo { NSApp.activate(ignoringOtherApps: true); panel?.makeKeyAndOrderFront(nil) }
+        showWindow()
         return true
     }
     func suppressBackgroundLaunch() {
@@ -816,11 +834,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func configureDemoMenu() {
         let bar = NSMenu()
         let root = NSMenuItem()
-        let menu = NSMenu(title: "Demo")
-        menu.addItem(withTitle: "Show Demo", action: #selector(showPanel), keyEquivalent: "0").target = self
-        menu.addItem(withTitle: "Stop Demo", action: #selector(stopListening), keyEquivalent: ".").target = self
+        let menu = NSMenu(title: demo ? "Demo" : "Conversation")
+        menu.addItem(withTitle: demo ? "Show Demo" : "Show Conversation", action: #selector(showWindow), keyEquivalent: "0").target = self
+        menu.addItem(withTitle: demo ? "Stop Demo" : "Stop Listening", action: #selector(stopListening), keyEquivalent: ".").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit Claude Conversation Demo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
+        menu.addItem(withTitle: demo ? "Quit Claude Conversation Demo" : "Quit Claude Conversation", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
         root.submenu = menu; bar.addItem(root); NSApp.mainMenu = bar
     }
     func applyVoice() {
@@ -831,6 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if demo { demoSpeaker.stop() }
         store.captures.removeAll(); store.speechIDs.removeAll(); store.heard = ""
         store.audio = nil; voiceLogIdentity = nil; voiceOffset = 0
+        if !store.settings.voice { try? FileManager.default.removeItem(atPath: voiceDir + "/microphone-owner.json") }
         if store.settings.voice {
             store.voiceError = ""; store.voiceStartedAt = Date().timeIntervalSince1970
             store.demoSecondsRemaining = 120
@@ -838,8 +857,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             do {
                 try FileManager.default.createDirectory(atPath: voiceDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                 for name in ["voice.log", "audio.json"] { try? FileManager.default.removeItem(atPath: voiceDir + "/" + name) }
+                try atomicJSON(["pid": ProcessInfo.processInfo.processIdentifier], path: voiceDir + "/microphone-owner.json")
                 let name = demo ? "ReadAloudDemoListen.app" : "ReadAloudListen.app"
-                let app = NSHomeDirectory() + "/.cache/read-aloud/" + name
+                let bundled = Bundle.main.resourceURL?.appendingPathComponent(name).path
+                let app = bundled.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? NSHomeDirectory() + "/.cache/read-aloud/" + name
                 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-g", "-a", app]
                 try p.run()
                 store.notice = "Starting on-device speech recognition…"
@@ -873,6 +894,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             store.notice = "Demo stopped after two minutes. Start it again when you are ready."
         }
         if demo && store.settings.voice { store.demoSecondsRemaining = max(0, 120 - Int(now - store.voiceStartedAt)) }
+        if FileManager.default.fileExists(atPath: voiceDir + "/show-panel") {
+            try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
+        }
         store.refresh(); tailVoice()
         if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
         let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
@@ -935,8 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ n: Notification) {
         suppressBackgroundLaunch()
         demoSpeaker.stop()
-        if demo { stopListening() }
-        else if store.settings.voice { store.update { $0.voice = false }; applyVoice() }
+        stopListening()
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
     }
 }
@@ -946,8 +969,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         panelSelfTests()
         #else
         if !demo && CommandLine.arguments.contains("--background") && FileManager.default.fileExists(atPath: panelDisabledPath) { return }
+        try? FileManager.default.createDirectory(atPath: voiceDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let lock = open(voiceDir + "/panel.lock", O_CREAT | O_RDWR, 0o600)
+        guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else {
+            if !CommandLine.arguments.contains("--background") { try? atomicJSON([:], path: voiceDir + "/show-panel") }
+            return
+        }
         let app = NSApplication.shared
-        app.setActivationPolicy(demo ? .regular : .accessory)
+        app.setActivationPolicy(demo || (prefs.object(forKey: "showInDock") as? Bool ?? true) ? .regular : .accessory)
         let delegate = AppDelegate(); app.delegate = delegate; app.run()
         #endif
     }
