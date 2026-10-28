@@ -157,6 +157,10 @@ final class Listener {
 
 @main struct ConversationListener {
     static func main() throws {
+        if CommandLine.arguments.contains("--status") {   // read-only: report the macOS permission state and exit
+            print("speech", SFSpeechRecognizer.authorizationStatus().rawValue, "microphone", AVCaptureDevice.authorizationStatus(for: .audio).rawValue, "(0 undecided, 3 allowed)")
+            return
+        }
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let lock = open(root + "/listener.lock", O_CREAT | O_RDWR, 0o600)
         guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { return }
@@ -166,10 +170,18 @@ final class Listener {
         let listener = Listener()
         guard let pid = listener.ownerPID, kill(pid, 0) == 0 else { return }
 
+        // a menu-bar-style app is never frontmost, and macOS then does not show the permission prompt: come forward while asking
+        func foreground(_ on: Bool) {
+            app.setActivationPolicy(on ? .regular : .accessory)
+            if on { app.activate(ignoringOtherApps: true) }
+        }
+
         func authorizeMicrophone() {
             if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { listener.start(); return }
             emit("diagnostic", text: "Waiting for macOS Microphone permission…")
+            foreground(true)
             AVCaptureDevice.requestAccess(for: .audio) { allowed in
+                DispatchQueue.main.async { foreground(false) }
                 guard allowed else { emit("error", text: "Allow Microphone access for the conversation helper in macOS Privacy settings."); exit(3) }
                 DispatchQueue.main.async { listener.start() }
             }
@@ -178,7 +190,9 @@ final class Listener {
         DispatchQueue.main.async {
             if SFSpeechRecognizer.authorizationStatus() == .authorized { authorizeMicrophone(); return }
             emit("diagnostic", text: "Waiting for macOS Speech Recognition permission…")
+            foreground(true)
             SFSpeechRecognizer.requestAuthorization { status in
+                DispatchQueue.main.async { foreground(false) }
                 guard status == .authorized else { emit("error", text: "Allow Speech Recognition for the conversation helper in macOS Privacy settings."); exit(2) }
                 DispatchQueue.main.async { authorizeMicrophone() }
             }

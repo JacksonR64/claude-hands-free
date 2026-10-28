@@ -706,6 +706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem?
     let popover = NSPopover()
     var hoverTask: DispatchWorkItem?
+    var collapsing = false
     var voiceOffset: UInt64 = 0
     var voiceLogIdentity: UInt64?
     let demoSpeaker = DemoSpeaker()
@@ -947,10 +948,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if presentation.expanded {
             mini.orderOut(nil)
             if !p.isVisible { p.orderFrontRegardless() }
-        } else {
+        } else if p.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            animateCollapse(p, into: mini)
+        } else if !collapsing {
             p.orderOut(nil)
             if !mini.isVisible { mini.orderFrontRegardless() }
         }
+    }
+
+    // the card shrinks and fades into its icon instead of vanishing
+    func animateCollapse(_ p: NSPanel, into mini: NSPanel) {
+        guard !collapsing else { return }
+        collapsing = true
+        let original = p.frame
+        let target = NSRect(x: mini.frame.midX - 6, y: mini.frame.midY - 6, width: 12, height: 12)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.4; ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            p.animator().setFrame(target, display: true); p.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            self.collapsing = false
+            if !self.presentation.expanded { p.orderOut(nil); if !mini.isVisible { mini.orderFrontRegardless() } }
+            p.alphaValue = 1; p.setFrame(original, display: false)
+        })
     }
     func resetPosition() {
         guard let p = panel, let sc = NSScreen.main else { return }

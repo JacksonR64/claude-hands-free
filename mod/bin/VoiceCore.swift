@@ -11,16 +11,19 @@ struct PanelPresentation {
     var expanded = false
     var hidden = false
     var lastInteraction: TimeInterval = 0
+    var hovered = false   // the pointer has been over it since it last opened
+    static let idleSeconds: TimeInterval = 2    // untouched: tuck away after this long
+    static let leaveSeconds: TimeInterval = 1   // after the pointer leaves: a short grace, then tuck away
     var seenEvents = Set<String>()
-    mutating func show(at now: TimeInterval) { hidden = false; expanded = true; lastInteraction = now }
+    mutating func show(at now: TimeInterval) { hidden = false; expanded = true; lastInteraction = now; hovered = false }
     mutating func hide() { hidden = true; expanded = false }
     mutating func collapse() { expanded = false }
     mutating func tick(events: Set<String>, now: TimeInterval, pointerInside: Bool, autoExpand: Bool, autoCollapse: Bool) {
         let fresh = events.subtracting(seenEvents)
         seenEvents = events
         if autoExpand && !hidden && !fresh.isEmpty { show(at: now) }
-        if pointerInside { lastInteraction = now }
-        if autoCollapse && expanded && !pointerInside && now - lastInteraction >= 8 { collapse() }
+        if pointerInside { lastInteraction = now; hovered = true }
+        if autoCollapse && expanded && !pointerInside && now - lastInteraction >= (hovered ? Self.leaveSeconds : Self.idleSeconds) { collapse() }
     }
 }
 
