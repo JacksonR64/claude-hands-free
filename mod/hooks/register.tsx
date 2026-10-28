@@ -515,7 +515,8 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box>
-        <Text>{p === 'queued' ? 'Queued to read aloud ' : p === 'paused' ? `Paused: ${name} ` : `Reading: ${name} `}</Text>
+        <Text>{p === 'queued' ? (settings.manual ? 'Ready to read aloud ' : 'Queued to read aloud ') : p === 'paused' ? `Paused: ${name} ` : `Reading: ${name} `}</Text>
+        {p === 'queued' && settings.manual && <Button key="play" label="Read now" onPress={() => { approved = true }} />}
         {p !== 'queued' && <Button key="pause" label={p === 'paused' ? 'Resume' : 'Pause'} onPress={() => togglePause($)} />}
         <Button key="stop" label="Stop" onPress={() => stopNow($, true)} />
       </Box>
