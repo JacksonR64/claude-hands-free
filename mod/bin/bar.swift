@@ -782,6 +782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem?
     let popover = NSPopover()
     var hoverTask: DispatchWorkItem?
+    var lastReadingStop = Date.distantPast
     var collapsing = false
     var voiceOffset: UInt64 = 0
     var voiceLogIdentity: UInt64?
@@ -975,6 +976,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
         }
         store.refresh(); tailVoice(); store.tickHandy()
+        // "Read replies aloud" off is enforced here too: a session still running an older copy of the mod reads regardless, so stop it
+        if !demo && !store.settings.reading, let reading = store.speaking, Date().timeIntervalSince(lastReadingStop) > 2 {
+            lastReadingStop = Date(); store.send("stop", reading)
+        }
         if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
         let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
         let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
