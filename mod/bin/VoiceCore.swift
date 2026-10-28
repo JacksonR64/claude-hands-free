@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 enum PanelMode: String, CaseIterable {
     case menuBar, edge, floating
@@ -28,7 +29,7 @@ struct PanelPresentation {
 }
 
 enum VoiceIntent: Equatable {
-    case next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
+    case startDictation, next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
 }
 
 func normalized(_ text: String) -> String {
@@ -41,6 +42,7 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     let prefixes = [normalized(wake), "okay claude", "ok claude", "hey claude", "okay", "ok"]
     for prefix in prefixes where text.hasPrefix(prefix + " ") { text = String(text.dropFirst(prefix.count + 1)); break }
     switch text {
+    case "dictate", "start dictation", "take a message", "new message": return .startDictation
     case "next session", "next chat", "next conversation": return .next
     case "previous session", "previous chat", "previous conversation": return .previous
     case "pause", "pause speaking": return .pause
@@ -62,6 +64,40 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
         if !name.isEmpty { return .select(name) }
     }
     return .dictate(transcript.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+// ---- Handy (https://github.com/cjpais/Handy): optional dictation engine. Its CLI starts/stops a recording and it
+// keeps every transcript in history.db, so the app can take the text itself instead of letting Handy paste it.
+let handyBinary = "/Applications/Handy.app/Contents/MacOS/Handy"
+var handySupport = NSHomeDirectory() + "/Library/Application Support/com.pais.handy"
+func handyInstalled() -> Bool { FileManager.default.isExecutableFile(atPath: handyBinary) }
+
+func handyQuery<T>(_ sql: String, _ read: (OpaquePointer) -> T?) -> T? {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(handySupport + "/history.db", &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let handle = db else { sqlite3_close(db); return nil }
+    defer { sqlite3_close(handle) }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else { return nil }
+    defer { sqlite3_finalize(statement) }
+    return sqlite3_step(statement) == SQLITE_ROW ? read(statement) : nil
+}
+func handyLastID() -> Int64 { handyQuery("SELECT COALESCE(MAX(id), 0) FROM transcription_history") { sqlite3_column_int64($0, 0) } ?? 0 }
+// the newest transcript after `id` (the post-processed text when Handy made one)
+func handyTranscript(after id: Int64) -> (id: Int64, text: String)? {
+    handyQuery("SELECT id, COALESCE(NULLIF(post_processed_text, ''), transcription_text) FROM transcription_history WHERE id > \(id) ORDER BY id DESC LIMIT 1") { s in
+        guard let c = sqlite3_column_text(s, 1) else { return nil }
+        return (sqlite3_column_int64(s, 0), String(cString: c))
+    }
+}
+func handyPasteMethod() -> String? {
+    guard let d = FileManager.default.contents(atPath: handySupport + "/settings_store.json"),
+          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+    return ((j["settings"] as? [String: Any]) ?? j)["paste_method"] as? String
+}
+func handyRun(_ flag: String) {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: handyBinary); p.arguments = [flag]
+    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+    try? p.run()
 }
 
 func wakePrefixes(_ wake: String) -> [String] { [normalized(wake), "okay claude", "ok claude", "hey claude"] }

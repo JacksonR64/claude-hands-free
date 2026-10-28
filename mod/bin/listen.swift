@@ -59,6 +59,7 @@ final class Listener {
     }()
     var wakeWord: String { (settingsJSON["wake"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "okay claude" }
     var requireWake: Bool { !demo && (settingsJSON["requireWake"] as? Bool ?? true) }
+    var useHandy: Bool { (settingsJSON["dictation"] as? String) == "handy" }   // the app starts Handy instead of arming Apple dictation
     var armedUntil = Date.distantPast    // "okay Claude" on its own: the next utterance is the message
     var full: String { carried.isEmpty ? transcript : transcript.isEmpty ? carried : carried + " " + transcript }
     var lastChange = Date(), lastVoice = Date(), started = Date()
@@ -211,6 +212,11 @@ final class Listener {
                     pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
                     emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
                 }
+            } else if case .startDictation = intent, !useHandy {   // "okay Claude, dictate": the next utterance is the message
+                armedUntil = now.addingTimeInterval(8)
+                emit("diagnostic", text: "Listening for your message…")
+                if let id = utterance { emit("cancel", id: id) }
+                restart()
             } else { finish() }   // commands are sent at once, with no countdown
         } else if now.timeIntervalSince(started) > 45 {   // the recogniser caps a request at about a minute: carry the words over
             if utterance != nil { carried = full; restart(keep: true) } else { restart() }

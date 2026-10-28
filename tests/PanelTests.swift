@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 func panelSelfTests() {
     assert(demo, "Run tests with --demo to disable real IPC")
@@ -49,6 +50,22 @@ func panelSelfTests() {
     assert(startsWithWake("Okay Claude, tell it hello") && !startsWithWake("tell it hello") && startsWithWake("okay claude"))
     assert(withoutWake("Okay, Claude, tell it hello") == "tell it hello" && withoutWake("okay claude") == "")
     assert(voiceIntent("next session") == .next, "Commands need no wake phrase")
+    assert(voiceIntent("okay Claude, dictate") == .startDictation && voiceIntent("start dictation") == .startDictation)
+    do {   // Handy's history database: newest transcript after a known id, post-processed text preferred
+        let tmp = NSTemporaryDirectory() + "handy-test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        assert(sqlite3_open(tmp + "/history.db", &db) == SQLITE_OK)
+        sqlite3_exec(db, "CREATE TABLE transcription_history (id INTEGER PRIMARY KEY AUTOINCREMENT, file_name TEXT, timestamp INTEGER, saved BOOLEAN, title TEXT, transcription_text TEXT, post_processed_text TEXT, post_process_prompt TEXT, post_process_requested BOOLEAN);", nil, nil, nil)
+        sqlite3_close(db)
+        let saved = handySupport; handySupport = tmp; defer { handySupport = saved }
+        assert(handyLastID() == 0 && handyTranscript(after: 0) == nil)
+        sqlite3_open(tmp + "/history.db", &db)
+        sqlite3_exec(db, "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested) VALUES ('a', 1, 0, 't', 'first message', NULL, 0), ('b', 2, 0, 't', 'raw words', 'Cleaned words.', 0);", nil, nil, nil)
+        sqlite3_close(db)
+        assert(handyLastID() == 2)
+        assert(handyTranscript(after: 0)?.text == "Cleaned words." && handyTranscript(after: 1)?.id == 2 && handyTranscript(after: 2) == nil)
+    } catch { assertionFailure("\(error)") }
     assert(voiceIntent("stop listening") == .stopListening)
     assert(voiceIntent("read again") == .readAgain)
     assert(!shouldFinishSpeech(hasTranscript: false, unchangedFor: 10, quietFor: 10))

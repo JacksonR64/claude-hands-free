@@ -29,6 +29,8 @@ struct Settings {
     var rate = 0, gap = 4
     var reading = true, rewrite = true, manual = false, captions = true, follow = false, voice = false
     var wake = "okay claude"
+    var dictation = "apple"   // or "handy"
+    var sendDelay = 5.0
 }
 func loadSettings() -> Settings {
     var s = Settings()
@@ -38,6 +40,7 @@ func loadSettings() -> Settings {
         s.reading = j["reading"] as? Bool ?? true; s.rewrite = j["rewrite"] as? Bool ?? true; s.manual = j["manual"] as? Bool ?? false
         s.captions = j["captions"] as? Bool ?? true; s.follow = j["follow"] as? Bool ?? false
         s.voice = j["voice"] as? Bool ?? false; s.wake = j["wake"] as? String ?? "okay claude"
+        s.dictation = j["dictation"] as? String ?? "apple"; s.sendDelay = j["sendDelay"] as? Double ?? 5
     }
     if demo { s.voice = false }
     return s
@@ -53,7 +56,7 @@ func saveSettings(_ s: Settings) throws {
     var old: [String: Any] = [:]
     if let data = FileManager.default.contents(atPath: settingsPath) { old = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:] }
     old.merge(["rate": s.rate, "gap": s.gap, "reading": s.reading, "rewrite": s.rewrite, "manual": s.manual,
-               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake]) { _, new in new }
+               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake, "dictation": s.dictation]) { _, new in new }
     try atomicJSON(old, path: settingsPath)
 }
 func openChat(_ s: S) {
@@ -195,6 +198,53 @@ final class Store: ObservableObject {
     @Published var delivery = ""
     @Published var aliases = prefs.dictionary(forKey: "voiceAliases") as? [String: String] ?? [:]
     var captures: [String: SpeechDestination] = [:]
+    // Handy dictation: started by voice, ended by silence, delivered after the countdown
+    struct HandySession { var afterID: Int64; var destination: SpeechDestination?; var started = Date(); var lastSpeech = Date(); var sawSpeech = false; var stopping = false }
+    var handySession: HandySession?
+    var handyHeld: (text: String, destination: SpeechDestination?, deadline: Date)?
+    func startHandy(_ destination: SpeechDestination?) {
+        guard !demo, handySession == nil, handyHeld == nil else { return }
+        guard handyInstalled() else { notice = "Handy isn't installed in /Applications."; return }
+        handySession = HandySession(afterID: handyLastID(), destination: destination)
+        handyRun("--toggle-transcription")
+        heard = "Dictating with Handy… speak, then pause"
+        let method = handyPasteMethod() ?? "ctrl_v"
+        notice = method == "none" ? "Handy is recording." : "Handy is recording. It will also type into the front app: set Handy's Paste method to None."
+    }
+    func tickHandy() {
+        let now = Date()
+        if let held = handyHeld {
+            if now >= held.deadline { deliverHeld() }
+            return
+        }
+        guard var h = handySession else { return }
+        if let row = handyTranscript(after: h.afterID) {
+            handySession = nil
+            let text = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { notice = "Handy heard nothing."; heard = ""; return }
+            handyHeld = (text, h.destination, now.addingTimeInterval(settings.sendDelay))
+            sendEndsAt = handyHeld!.deadline.timeIntervalSince1970 * 1000; userCaption = text
+            if settings.sendDelay <= 0 { deliverHeld() }
+            return
+        }
+        if h.sawSpeech && !h.stopping && now.timeIntervalSince(h.lastSpeech) > 2.5 { h.stopping = true; handyRun("--toggle-transcription"); heard = "Transcribing…" }
+        else if now.timeIntervalSince(h.started) > 120 { handyRun("--cancel"); handySession = nil; heard = ""; notice = "Handy dictation timed out."; return }
+        handySession = h
+    }
+    func deliverHeld() {
+        guard let held = handyHeld else { return }
+        handyHeld = nil; sendEndsAt = nil
+        let id = UUID().uuidString
+        speechIDs.insert(id); captures[id] = held.destination
+        voice(["event": "final", "id": id, "text": held.text])
+    }
+    func sendNowPressed() {
+        if handyHeld != nil { deliverHeld() } else { FileManager.default.createFile(atPath: voiceDir + "/send-now", contents: Data()) }
+    }
+    func cancelSendPressed() {
+        if handyHeld != nil { handyHeld = nil; sendEndsAt = nil; heard = ""; notice = "Message discarded." }
+        else { FileManager.default.createFile(atPath: voiceDir + "/cancel-utterance", contents: Data()) }
+    }
     var speechIDs = Set<String>()
     var commands: [String: (String, Date)] = [:]
     var selected: S? { all.first { $0.id == activeID && $0.instance == activeInstance } }
@@ -299,6 +349,8 @@ final class Store: ObservableObject {
             if demo { demoSay(notice) }
             return
         }
+        if handySession != nil, kind == "begin" || kind == "partial" { handySession?.sawSpeech = true; handySession?.lastSpeech = Date(); return }
+        if handySession != nil || handyHeld != nil { return }   // while Handy dictates, the Apple recogniser only signals that you are talking
         guard let id = event["id"] as? String else { return }
         if kind == "begin" {
             if demo && allowInterruption { demoStop?() }
@@ -330,6 +382,8 @@ final class Store: ObservableObject {
             }
         }
         switch intent {
+        case .startDictation:
+            if settings.dictation == "handy" { startHandy(destination) } else { notice = "Say your message." }
         case .stopListening:
             update { $0.voice = false }; voiceChanged?(); notice = "Microphone off."
         case .readAgain: if let s = selected { send("read", s) }
@@ -463,8 +517,8 @@ struct AudioActivityView: View {
                         ProgressView(value: min(1, left / 5)).progressViewStyle(.linear).tint(.orange).frame(width: 60)
                         Text("Sending in \(Int(ceil(left)))s").font(.system(size: 11, weight: .semibold)).monospacedDigit()
                         Spacer(minLength: 4)
-                        Button("Send now") { FileManager.default.createFile(atPath: voiceDir + "/send-now", contents: Data()) }
-                        Button("Cancel") { FileManager.default.createFile(atPath: voiceDir + "/cancel-utterance", contents: Data()) }
+                        Button("Send now") { store.sendNowPressed() }
+                        Button("Cancel") { store.cancelSendPressed() }
                     }.controlSize(.mini)
                 }
             }
@@ -667,6 +721,11 @@ struct Card: View {
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
             Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v, let s = store.speaking { store.send("stop", s) } }))
+            if handyInstalled() {
+                Picker("Dictation", selection: Binding(get: { store.settings.dictation }, set: { v in store.update { $0.dictation = v } })) {
+                    Text("Apple on-device").tag("apple"); Text("Handy").tag("handy")
+                }
+            }
             Toggle("Wait before reading replies", isOn: Binding(get: { store.settings.manual }, set: { v in store.update { $0.manual = v } }))
             Menu("Speaking speed") {
                 ForEach([0, 140, 165, 210, 250], id: \.self) { rate in Button(rate == 0 ? "Default" : "\(rate) words/min") { store.update { $0.rate = rate } } }
@@ -915,7 +974,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if FileManager.default.fileExists(atPath: voiceDir + "/show-panel") {
             try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
         }
-        store.refresh(); tailVoice()
+        store.refresh(); tailVoice(); store.tickHandy()
         if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
         let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
         let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
