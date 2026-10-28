@@ -43,6 +43,15 @@ final class Listener {
     var task: SFSpeechRecognitionTask?
     var utterance: String?
     var transcript = ""
+    var carried = ""                    // earlier recogniser segments of this same utterance (a request lasts under a minute)
+    var pendingUntil: Date?              // set while the send countdown runs
+    var pendingStart = Date()
+    let sendDelay: Double = {            // seconds of silence before a dictated message is sent; ~/.config/read-aloud/settings.json "sendDelay"
+        let path = NSHomeDirectory() + "/.config/read-aloud/settings.json"
+        if let d = FileManager.default.contents(atPath: path), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let v = j["sendDelay"] as? Double { return max(0, min(30, v)) }
+        return 5
+    }()
+    var full: String { carried.isEmpty ? transcript : transcript.isEmpty ? carried : carried + " " + transcript }
     var lastChange = Date(), lastVoice = Date(), started = Date()
     var generation = 0
     var failures = 0
@@ -84,12 +93,13 @@ final class Listener {
                     }
                 }
             }
+            for marker in ["/cancel-utterance", "/send-now"] { try? FileManager.default.removeItem(atPath: root + marker) }
             engine.prepare(); try engine.start(); restart()
             timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
             emit("ready", text: "Listening on this Mac")
         } catch { emit("error", text: "Couldn't start microphone processing: \(error.localizedDescription)"); exit(3) }
     }
-    func restart() {
+    func restart(keep: Bool = false) {
         generation += 1
         let mine = generation
         task?.cancel()
@@ -101,7 +111,8 @@ final class Listener {
         requestLock.lock()
         request?.endAudio(); request = fresh
         requestLock.unlock()
-        started = Date(); utterance = nil; transcript = ""; lastChange = Date()
+        started = Date(); transcript = ""
+        if !keep { utterance = nil; carried = ""; pendingUntil = nil; lastChange = Date() }
         task = recognizer?.recognitionTask(with: fresh) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self, self.generation == mine, !self.mutedForPlayback,
@@ -111,9 +122,12 @@ final class Listener {
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         if self.utterance == nil { self.utterance = UUID().uuidString; emit("begin", id: self.utterance) }
-                        if text != self.transcript { self.transcript = text; self.lastChange = Date(); emit("partial", id: self.utterance, text: text) }
+                        if text != self.transcript { self.transcript = text; self.lastChange = Date(); emit("partial", id: self.utterance, text: self.full) }
                     }
-                    if result.isFinal { self.finish(); return }
+                    if result.isFinal {   // the recogniser ended this segment: keep the words and carry on listening
+                        if self.utterance != nil { self.carried = self.full; self.restart(keep: true) } else { self.restart() }
+                        return
+                    }
                 }
                 if let error = error {
                     self.recognitionState = "retrying"
@@ -128,7 +142,7 @@ final class Listener {
         }
     }
     func finish() {
-        if let id = utterance, !transcript.isEmpty { emit("final", id: id, text: transcript) }
+        if let id = utterance, !full.isEmpty { emit("final", id: id, text: full) }
         restart()
     }
     func tick() {
@@ -145,13 +159,34 @@ final class Listener {
                 mutedForPlayback = true; generation += 1; task?.cancel()
                 requestLock.lock(); request?.endAudio(); request = nil; requestLock.unlock()
                 if let id = utterance { emit("cancel", id: id) }
-                utterance = nil; transcript = ""
+                utterance = nil; transcript = ""; carried = ""; pendingUntil = nil
             }
             return
         }
         if mutedForPlayback { mutedForPlayback = false; restart(); return }
-        if shouldFinishSpeech(hasTranscript: utterance != nil, unchangedFor: Date().timeIntervalSince(lastChange), quietFor: Date().timeIntervalSince(lastVoice)) { finish() }
-        else if Date().timeIntervalSince(started) > 45 { if utterance != nil { finish() } else { restart() } }
+        let now = Date()
+        if let until = pendingUntil {   // countdown: more speech cancels it, the panel can cancel or send now
+            if lastChange > pendingStart { pendingUntil = nil; emit("resume", id: utterance) }
+            else if FileManager.default.fileExists(atPath: root + "/cancel-utterance") {
+                try? FileManager.default.removeItem(atPath: root + "/cancel-utterance")
+                if let id = utterance { emit("cancel", id: id) }
+                restart()
+            } else if now >= until || FileManager.default.fileExists(atPath: root + "/send-now") {
+                try? FileManager.default.removeItem(atPath: root + "/send-now")
+                finish()
+            }
+            return
+        }
+        if shouldFinishSpeech(hasTranscript: utterance != nil && !full.isEmpty, unchangedFor: now.timeIntervalSince(lastChange), quietFor: now.timeIntervalSince(lastVoice)) {
+            if sendDelay <= 0 { finish() }
+            else {
+                pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
+                emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
+            }
+        } else if now.timeIntervalSince(started) > 45 {   // the recogniser caps a request at about a minute: carry the words over
+            if utterance != nil { carried = full; restart(keep: true) } else { restart() }
+        }
+
     }
 }
 

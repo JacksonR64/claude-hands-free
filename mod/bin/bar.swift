@@ -137,6 +137,7 @@ final class Store: ObservableObject {
     @Published var audioDisplay = AudioDisplay(rawValue: prefs.string(forKey: "audioDisplay") ?? "") ?? .both
     @Published var allowInterruption = prefs.bool(forKey: "allowInterruption")
     @Published var userCaption = ""
+    @Published var sendEndsAt: Double?   // ms since 1970: when the dictated message will be sent
     @Published var assistantCaption = ""
     @Published var demoSecondsRemaining = 120
     var demoStop: (() -> Void)?
@@ -306,11 +307,14 @@ final class Store: ObservableObject {
             if let current = speaking, current.phase == "speaking" { send("toggle", current) }
             heard = "Listening…"; return
         }
-        if kind == "cancel" { speechIDs.remove(id); captures.removeValue(forKey: id); heard = ""; return }
+        if kind == "cancel" { speechIDs.remove(id); captures.removeValue(forKey: id); heard = ""; sendEndsAt = nil; return }
+        if kind == "resume" { sendEndsAt = nil; return }
         guard speechIDs.contains(id) else { return }
         let text = event["text"] as? String ?? ""
-        if kind == "partial" { heard = text; userCaption = text; return }
+        if kind == "partial" { heard = text; userCaption = text; sendEndsAt = nil; return }
+        if kind == "pending" { sendEndsAt = Double(text); return }
         guard kind == "final" else { return }
+        sendEndsAt = nil
         speechIDs.remove(id)
         let destination = captures.removeValue(forKey: id)
         heard = text; userCaption = text
@@ -451,6 +455,18 @@ struct AudioActivityView: View {
                     }
                 }.frame(height: 24).animation(.linear(duration: 0.1), value: store.inputHistory)
                     .accessibilityLabel("Measured microphone input level")
+            }
+            if let ends = store.sendEndsAt {
+                TimelineView(.periodic(from: .now, by: 0.1)) { context in
+                    let left = max(0, ends / 1000 - context.date.timeIntervalSince1970)
+                    HStack(spacing: 8) {
+                        ProgressView(value: min(1, left / 5)).progressViewStyle(.linear).tint(.orange).frame(width: 60)
+                        Text("Sending in \(Int(ceil(left)))s").font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                        Spacer(minLength: 4)
+                        Button("Send now") { FileManager.default.createFile(atPath: voiceDir + "/send-now", contents: Data()) }
+                        Button("Cancel") { FileManager.default.createFile(atPath: voiceDir + "/cancel-utterance", contents: Data()) }
+                    }.controlSize(.mini)
+                }
             }
             if store.audioDisplay != .waveform {
                 VStack(alignment: .leading, spacing: 4) {
