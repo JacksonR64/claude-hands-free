@@ -64,6 +64,25 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     return .dictate(transcript.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
+func wakePrefixes(_ wake: String) -> [String] { [normalized(wake), "okay claude", "ok claude", "hey claude"] }
+
+// Dictation starts only when the utterance opens with the wake phrase; commands need no wake phrase.
+func startsWithWake(_ transcript: String, wake: String = "okay claude") -> Bool {
+    let text = normalized(transcript)
+    return wakePrefixes(wake).contains { !$0.isEmpty && (text == $0 || text.hasPrefix($0 + " ")) }
+}
+
+func withoutWake(_ transcript: String, wake: String = "okay claude") -> String {
+    let tokens = transcript.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    for prefix in wakePrefixes(wake) where !prefix.isEmpty {
+        let words = prefix.split(separator: " ").map(String.init)
+        if tokens.count >= words.count, zip(tokens, words).allSatisfy({ normalized($0.0) == $0.1 }) {
+            return tokens.dropFirst(words.count).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.:;!?-"))
+        }
+    }
+    return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 struct VoiceCandidate { let id: String; let names: [String] }
 
 // An exact alias wins; otherwise all token-sequence matches must identify one session.

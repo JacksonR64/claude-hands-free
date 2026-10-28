@@ -51,6 +51,15 @@ final class Listener {
         if let d = FileManager.default.contents(atPath: path), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let v = j["sendDelay"] as? Double { return max(0, min(30, v)) }
         return 5
     }()
+    // settings.json: "wake" (phrase) and "requireWake" (default true: dictation needs it; commands never do)
+    let settingsJSON: [String: Any] = {
+        let path = NSHomeDirectory() + "/.config/read-aloud/settings.json"
+        guard let d = FileManager.default.contents(atPath: path), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return j
+    }()
+    var wakeWord: String { (settingsJSON["wake"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "okay claude" }
+    var requireWake: Bool { !demo && (settingsJSON["requireWake"] as? Bool ?? true) }
+    var armedUntil = Date.distantPast    // "okay Claude" on its own: the next utterance is the message
     var full: String { carried.isEmpty ? transcript : transcript.isEmpty ? carried : carried + " " + transcript }
     var lastChange = Date(), lastVoice = Date(), started = Date()
     var generation = 0
@@ -142,7 +151,12 @@ final class Listener {
         }
     }
     func finish() {
-        if let id = utterance, !full.isEmpty { emit("final", id: id, text: full) }
+        if let id = utterance, !full.isEmpty {
+            var out = full
+            if requireWake, case .dictate = voiceIntent(full, wake: wakeWord), startsWithWake(full, wake: wakeWord) { out = withoutWake(full, wake: wakeWord) }
+            emit("final", id: id, text: out)
+        }
+        armedUntil = .distantPast
         restart()
     }
     func tick() {
@@ -178,11 +192,26 @@ final class Listener {
             return
         }
         if shouldFinishSpeech(hasTranscript: utterance != nil && !full.isEmpty, unchangedFor: now.timeIntervalSince(lastChange), quietFor: now.timeIntervalSince(lastVoice)) {
-            if sendDelay <= 0 { finish() }
-            else {
-                pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
-                emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
-            }
+            let intent = voiceIntent(full, wake: wakeWord)
+            if case .dictate = intent {
+                let addressed = startsWithWake(full, wake: wakeWord) || now < armedUntil
+                if requireWake && !addressed {   // not said to us: never sent
+                    emit("diagnostic", text: "Heard speech without “\(wakeWord)”. Say it first to dictate a message.")
+                    if let id = utterance { emit("cancel", id: id) }
+                    restart(); return
+                }
+                if requireWake && startsWithWake(full, wake: wakeWord) && withoutWake(full, wake: wakeWord).isEmpty {   // only the wake phrase
+                    armedUntil = now.addingTimeInterval(8)
+                    emit("diagnostic", text: "Listening for your message…")
+                    if let id = utterance { emit("cancel", id: id) }
+                    restart(); return
+                }
+                if sendDelay <= 0 { finish() }   // a message: the countdown runs
+                else {
+                    pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
+                    emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
+                }
+            } else { finish() }   // commands are sent at once, with no countdown
         } else if now.timeIntervalSince(started) > 45 {   // the recogniser caps a request at about a minute: carry the words over
             if utterance != nil { carried = full; restart(keep: true) } else { restart() }
         }

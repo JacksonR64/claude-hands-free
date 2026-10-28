@@ -27,7 +27,7 @@ struct S: Identifiable, Decodable {
 }
 struct Settings {
     var rate = 0, gap = 4
-    var rewrite = true, manual = false, captions = true, follow = false, voice = false
+    var reading = true, rewrite = true, manual = false, captions = true, follow = false, voice = false
     var wake = "okay claude"
 }
 func loadSettings() -> Settings {
@@ -35,7 +35,7 @@ func loadSettings() -> Settings {
     if let data = FileManager.default.contents(atPath: settingsPath),
        let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         s.rate = j["rate"] as? Int ?? 0; s.gap = j["gap"] as? Int ?? 4
-        s.rewrite = j["rewrite"] as? Bool ?? true; s.manual = j["manual"] as? Bool ?? false
+        s.reading = j["reading"] as? Bool ?? true; s.rewrite = j["rewrite"] as? Bool ?? true; s.manual = j["manual"] as? Bool ?? false
         s.captions = j["captions"] as? Bool ?? true; s.follow = j["follow"] as? Bool ?? false
         s.voice = j["voice"] as? Bool ?? false; s.wake = j["wake"] as? String ?? "okay claude"
     }
@@ -52,7 +52,7 @@ func atomicJSON(_ value: [String: Any], path: String) throws {
 func saveSettings(_ s: Settings) throws {
     var old: [String: Any] = [:]
     if let data = FileManager.default.contents(atPath: settingsPath) { old = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:] }
-    old.merge(["rate": s.rate, "gap": s.gap, "rewrite": s.rewrite, "manual": s.manual,
+    old.merge(["rate": s.rate, "gap": s.gap, "reading": s.reading, "rewrite": s.rewrite, "manual": s.manual,
                "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake]) { _, new in new }
     try atomicJSON(old, path: settingsPath)
 }
@@ -666,6 +666,7 @@ struct Card: View {
             Toggle("Natural spoken rewrite", isOn: Binding(get: { store.settings.rewrite }, set: { v in store.update { $0.rewrite = v } }))
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
+            Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v, let s = store.speaking { store.send("stop", s) } }))
             Toggle("Wait before reading replies", isOn: Binding(get: { store.settings.manual }, set: { v in store.update { $0.manual = v } }))
             Menu("Speaking speed") {
                 ForEach([0, 140, 165, 210, 250], id: \.self) { rate in Button(rate == 0 ? "Default" : "\(rate) words/min") { store.update { $0.rate = rate } } }
