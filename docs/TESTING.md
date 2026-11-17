@@ -31,7 +31,7 @@ On 27 October 2026, the full 0.7.0 check passed on the M5 MacBook: 12 Python tes
 
 ## Safe manual demo trial (no Claude usage)
 
-1. Open `~/Applications/Claude Conversation Demo.app`. Confirm visible window, menu-bar/Dock entry and Microphone off.
+1. Open `~/Applications/Claude Hands Free Demo.app`. Confirm visible window, menu-bar/Dock entry and Microphone off.
 2. Select Captions or Both. Click Test speaker first; check audible quality independently of capture.
 3. Explicitly enable the demo microphone and grant only its requested permissions. Confirm arriving input levels and recognised words; a macOS mic indicator or `ready` event alone is insufficient.
 4. Answer its scripted question, say “next session”, “ask me a question”, and “read again”. Wait for speech to end with interruption off. Check selected session and both caption lanes.
@@ -41,7 +41,7 @@ On 27 October 2026, the full 0.7.0 check passed on the M5 MacBook: 12 Python tes
 ## Live trial (Claude usage required)
 
 1. Run local checks/install, then `/reload-plugins` in two harmless Code sessions that load read-aloud. Give them distinct names in the controller.
-2. Open `~/Applications/Claude Conversation.app`, select one session and explicitly enable its microphone. Grant the live listener's own permissions if requested.
+2. Open `~/Applications/Claude Hands Free.app`, select one session and explicitly enable its microphone. Grant the live listener's own permissions if requested.
 3. Dictate a harmless message; compare the caption with the received prompt and queued/started receipt. Switch by name and by next/previous, checking the heading each time.
 4. Use an ordinary question to test `AskUserQuestion`. For permission testing use a reversible local operation in a disposable directory. “Yes” must never approve a tool action; “deny action” must decline only the displayed request. Test explicit approval only when intentionally authorised.
 5. Change selection during an utterance; expect rejection/repetition rather than delivery to the new session. Check queued-message behaviour while Claude is busy.
