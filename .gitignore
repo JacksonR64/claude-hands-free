@@ -10,3 +10,6 @@ SESSION_PROMPT.md
 .env.*
 *.pem
 *.key
+
+# private session context (the repo is public)
+context/
