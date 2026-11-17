@@ -1,4 +1,4 @@
-# read-aloud · Claude Conversation MVP
+# read-aloud · Claude Hands Free MVP
 
 This local extension adds hands-free session selection, a persistent floating panel and request-bound answers to the original MIT read-aloud mod.
 

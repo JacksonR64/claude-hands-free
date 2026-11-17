@@ -55,7 +55,7 @@ if stale "$D/Contents/Resources/ReadAloudDemoListen.app/Contents/MacOS/read-alou
   /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.read-aloud.conversation.demo' "$D/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable read-aloud-demo' "$D/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :LSUIElement false' "$D/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Claude Conversation Demo' "$D/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Claude Hands Free Demo' "$D/Contents/Info.plist"
   mkdir -p "$D/Contents/Resources"
   rm -rf "$D/Contents/Resources/ReadAloudDemoListen.app"
   cp -R "$L" "$D/Contents/Resources/"

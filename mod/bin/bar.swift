@@ -582,7 +582,7 @@ struct Card: View {
             HStack {
                 Image(systemName: "waveform.circle.fill").font(.title2).foregroundStyle(.orange)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("CLAUDE CONVERSATION").font(.system(size: 9, weight: .bold)).tracking(1.4).foregroundStyle(.secondary)
+                    Text("CLAUDE HANDS FREE").font(.system(size: 9, weight: .bold)).tracking(1.4).foregroundStyle(.secondary)
                     Text(store.selected.map { store.label($0) } ?? (store.activeID.isEmpty ? "Choose a session" : "Selected session disconnected"))
                         .font(.system(size: 17, weight: .semibold)).lineLimit(1)
                 }
@@ -763,7 +763,7 @@ struct CompactTab: View {
             }.frame(width: store.mode == .edge ? 26 : 36, height: store.mode == .edge ? 48 : 36)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
-        }.buttonStyle(.plain).help("Open Claude Conversation")
+        }.buttonStyle(.plain).help("Open Claude Hands Free")
             .onHover { (NSApp.delegate as? AppDelegate)?.hoverCompact($0) }
             .contextMenu {
                 Button("Open") { (NSApp.delegate as? AppDelegate)?.showPanel() }
@@ -817,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.target = self; item.button?.action = #selector(toggleStatus)
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        item.button?.setAccessibilityLabel(demo ? "Claude Conversation Demo" : "Claude Conversation")
+        item.button?.setAccessibilityLabel(demo ? "Claude Hands Free Demo" : "Claude Hands Free")
         statusItem = item
         store.voiceChanged = { [weak self] in self?.applyVoice() }
         if demo {
@@ -916,7 +916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         menu.addItem(withTitle: demo ? "Show Demo" : "Show Conversation", action: #selector(showWindow), keyEquivalent: "0").target = self
         menu.addItem(withTitle: demo ? "Stop Demo" : "Stop Listening", action: #selector(stopListening), keyEquivalent: ".").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: demo ? "Quit Claude Conversation Demo" : "Quit Claude Conversation", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
+        menu.addItem(withTitle: demo ? "Quit Claude Hands Free Demo" : "Quit Claude Hands Free", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
         root.submenu = menu; bar.addItem(root); NSApp.mainMenu = bar
     }
     func applyVoice() {
@@ -983,9 +983,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
         let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
         let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
-        statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Claude Conversation")
+        statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Claude Hands Free")
         statusItem?.button?.image?.isTemplate = true
-        statusItem?.button?.toolTip = demo ? "Claude Conversation Demo · no Claude usage" : needsAnswer > 0 ? "\(needsAnswer) session(s) need your answer" : "Claude Conversation"
+        statusItem?.button?.toolTip = demo ? "Claude Hands Free Demo · no Claude usage" : needsAnswer > 0 ? "\(needsAnswer) session(s) need your answer" : "Claude Hands Free"
         var events = Set(store.all.flatMap { $0.pending.map { $0.id } })
         for s in store.all where s.ready && s.work == "idle" { events.insert("finished-\(s.id)-\(s.instance)") }
         let mouse = NSEvent.mouseLocation
