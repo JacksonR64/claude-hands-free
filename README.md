@@ -1,4 +1,4 @@
-# Claude Conversation
+# Claude Hands Free
 
 A personal macOS voice controller for existing Claude Code sessions. A menu-bar icon opens a panel showing which conversation receives your speech and which others are working or waiting for an answer.
 
@@ -36,7 +36,7 @@ The installer validates and compiles before replacing `~/.claude/mods/read-aloud
 
 If read-aloud was already loaded globally, run `/reload-plugins` in each Claude Code session you want to use. Otherwise load this project's `mod/` as a local plugin using a compatible host's `--plugin-dir` option. Only sessions that load the mod participate. A normal Claude/Projects chat is not a Code session and will not appear.
 
-Open `~/Applications/Claude Conversation.app` (a link to the built app in `~/.cache/read-aloud/`). It shows a window and has a waveform menu-bar icon. The microphone starts off each launch. Choose a session, then explicitly click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**, its embedded listener. Existing hotkeys still use the read-aloud Accessibility permission.
+Open `~/Applications/Claude Hands Free.app` (a link to the built app in `~/.cache/read-aloud/`). It shows a window and has a waveform menu-bar icon. The microphone starts off each launch. Choose a session, then explicitly click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**, its embedded listener. Existing hotkeys still use the read-aloud Accessibility permission.
 
 **Stop listening** or **Cmd+.** stops capture and requests current speech to stop; **Quit** or **Cmd+Q** exits. Clicking the Dock icon recovers a visible window, including after a background launch. **… → Show in Dock** is on by default and can be disabled for menu-bar-only use.
 
@@ -54,7 +54,7 @@ The two compact presentations expand on click, optionally on hover, and collapse
 
 ## Test without Claude usage
 
-Open `~/Applications/Claude Conversation Demo.app` after installation. It has a Dock entry, a ladybird menu-bar icon and a visible window. Click its Dock icon to recover the window if menu-bar space is limited. The demo starts with its microphone off and idle collapse disabled. It uses separate UI preferences, fake sessions, and an isolated microphone helper. Real session IPC is disabled.
+Open `~/Applications/Claude Hands Free Demo.app` after installation. It has a Dock entry, a ladybird menu-bar icon and a visible window. Click its Dock icon to recover the window if menu-bar space is limited. The demo starts with its microphone off and idle collapse disabled. It uses separate UI preferences, fake sessions, and an isolated microphone helper. Real session IPC is disabled.
 
 Click its microphone once and accept macOS Microphone and Speech Recognition prompts for **Conversation Demo Microphone**, if shown. After recognition starts, the Mac introduces the first fake session and asks a question aloud. Answer **grey patches** or **clear to black**; wait for its acknowledgement, then say **next session** or **move to printers session**. Say **ask me a question**, **show an approval**, **finish work**, **reset demo**, or **all quiet** to simulate activity by voice. Say **read again** to hear the selected session, **approve action** or **deny action** for a simulated permission, and **stop demo**, **microphone off** or **stop listening** to end capture. Demo replies are generated locally with `say` and played as buffered audio with `afplay`; no model is called. Unscripted speech outside a pending question appears as captions without being repeated aloud.
 

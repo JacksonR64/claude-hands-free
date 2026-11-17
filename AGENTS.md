@@ -1,4 +1,4 @@
-# Claude Conversation
+# Claude Hands Free
 
 Personal macOS voice controller for existing Claude Code sessions, built on the read-aloud mod. Jackson authorized the MVP build on 25 October 2026 and public GitHub source publication on 27 October 2026.
 
