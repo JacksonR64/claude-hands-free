@@ -94,6 +94,23 @@ python3 scripts/install.py --rollback "$(cat work/last-backup.txt)"
 
 Reload the plugin afterwards. Backups are local and may contain personal settings; do not publish `work/`.
 
+## Always-on background session (macOS)
+
+This is optional. It keeps one Claude Code session running in this folder, hidden in tmux, with Remote Control on. Other Claude Code sessions on the Mac can reach it with SendMessage, and you can watch or steer it from the Claude app. Its brief, `scripts/worker-brief.md`, tells it never to turn on a microphone and to ask before it installs, pushes or deletes anything.
+
+Prerequisites: the Claude Code CLI logged in on its own (check with `claude auth status`; run `claude` then `/login` if needed), and tmux (`brew install tmux`).
+
+```sh
+sh scripts/start-worker.sh          # start it once, now
+sh scripts/install-worker.sh        # or: start it now and at every login (per-user LaunchAgent)
+tmux attach -t hands-free           # watch it; detach with Ctrl-b d
+sh scripts/uninstall-worker.sh --stop   # remove the LaunchAgent and end the session
+```
+
+Settings go in environment variables or `~/.config/claude-hands-free/worker.env`. The variables are listed at the top of `scripts/start-worker.sh`. They cover the session name, the tmux name, the folder, the brief, and an extra brief file appended to it, which is where your own mailbox or routing instructions go. The log is `~/Library/Logs/claude-hands-free-worker.log`. Re-running the start script does nothing while the session is up.
+
+Folder trust: a hidden session can't answer Claude Code's "trust this folder?" prompt, so it would sit there unseen. Either open `claude` in this folder once and accept the prompt, or set `HF_WORKER_TRUST=1` so the start script marks the folder trusted in `~/.claude.json`. It backs that file up first. Check for a stuck prompt with `tmux capture-pane -p -t hands-free`.
+
 ## How it fits together
 
 - `mod/hooks/register.tsx`: a mod in each Code session; lifecycle state, message delivery, questions, permission requests and spoken replies.
