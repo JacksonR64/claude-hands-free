@@ -24,7 +24,7 @@ class WorkerLaunchAgentTests(unittest.TestCase):
 
     def test_worker_files_carry_no_personal_paths(self):
         for name in ['start-worker.sh', 'install-worker.sh', 'uninstall-worker.sh',
-                     'worker-brief.md', 'worker.plist.template']:
+                     'worker-brief.md', 'worker-rules.md', 'worker.plist.template']:
             self.assertNotIn('/Users/', (ROOT / 'scripts' / name).read_text(), name)
 
 

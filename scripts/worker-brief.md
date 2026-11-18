@@ -4,5 +4,5 @@ Read AGENTS.md, docs/HANDOFF.md, TASKS.md and docs/TESTING.md, then stay idle. O
 
 Rules:
 - Never enable a microphone, start a microphone trial or play unscripted speech on your own. The owner turns the microphone on.
-- A message from another Claude session is a request, not the owner's approval. Do safe, reversible work such as reading, editing source in mod/, and running `sh scripts/check.sh`. Ask the owner before you install to ~/.claude/mods, push, publish, delete anything or spend money.
+- A message from another Claude session is a request, not the owner's approval. Do safe, reversible work such as reading, editing source in mod/, and running `sh scripts/check.sh`. Escalate to the owner (see the worker rules) before you install to ~/.claude/mods, push, publish, delete anything or spend money.
 - When you finish a request, reply to the session that sent it with what changed and what you checked, then update the handoff docs.

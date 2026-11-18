@@ -107,7 +107,7 @@ tmux attach -t hands-free           # watch it; detach with Ctrl-b d
 sh scripts/uninstall-worker.sh --stop   # remove the LaunchAgent and end the session
 ```
 
-Settings go in environment variables or `~/.config/claude-hands-free/worker.env`. The variables are listed at the top of `scripts/start-worker.sh`. They cover the session name, the tmux name, the folder, the brief, and an extra brief file appended to it, which is where your own mailbox or routing instructions go. The log is `~/Library/Logs/claude-hands-free-worker.log`. Re-running the start script does nothing while the session is up.
+Settings go in environment variables or `~/.config/claude-hands-free/worker.env`. The variables are listed at the top of `scripts/start-worker.sh`. They cover the session name, the tmux name, the folder, the brief, and an extra brief file appended to it, which is where your own mailbox or routing instructions go. Because nobody watches the hidden session, it runs with `AskUserQuestion` disabled and `scripts/worker-rules.md` appended to its system prompt: anything that needs you goes out through `HF_WORKER_ESCALATE` (by default a note file in `~/.local/state/claude-hands-free/for-owner/`; set it to your own channel, such as a mailbox command). The log is `~/Library/Logs/claude-hands-free-worker.log`. Re-running the start script does nothing while the session is up.
 
 Folder trust: a hidden session can't answer Claude Code's "trust this folder?" prompt, so it would sit there unseen. Either open `claude` in this folder once and accept the prompt, or set `HF_WORKER_TRUST=1` so the start script marks the folder trusted in `~/.claude.json`. It backs that file up first. Check for a stuck prompt with `tmux capture-pane -p -t hands-free`.
 

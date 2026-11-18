@@ -7,6 +7,9 @@
 #   HF_WORKER_DIR    folder the session works in                  (default this repo)
 #   HF_WORKER_BRIEF  first prompt                                 (default scripts/worker-brief.md)
 #   HF_WORKER_EXTRA  optional extra brief appended to it, e.g. your own mailbox instructions
+#   HF_WORKER_RULES  system-prompt rules appended to every turn    (default scripts/worker-rules.md)
+#   HF_WORKER_ESCALATE how the worker reaches you; replaces {ESCALATE} in the rules
+#                    (default: write a note file under ~/.local/state/claude-hands-free/for-owner/)
 #   HF_WORKER_TRUST  1 = mark HF_WORKER_DIR trusted in ~/.claude.json (backed up first); default 0
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,10 +22,14 @@ NAME="${HF_WORKER_NAME:-Claude Hands Free worker}"
 T="${HF_WORKER_TMUX:-hands-free}"
 DIR="${HF_WORKER_DIR:-$REPO}"
 BRIEF="${HF_WORKER_BRIEF:-$REPO/scripts/worker-brief.md}"
+RULES="${HF_WORKER_RULES:-$REPO/scripts/worker-rules.md}"
+INBOX="$HOME/.local/state/claude-hands-free/for-owner"
+ESCALATE="${HF_WORKER_ESCALATE:-write a markdown note to $INBOX/<UTC timestamp>-<short-slug>.md (create the folder if needed).}"
 
 command -v tmux >/dev/null || { echo "tmux not found (brew install tmux)"; exit 1; }
 command -v claude >/dev/null || { echo "claude CLI not found"; exit 1; }
 [ -f "$BRIEF" ] || { echo "no brief at $BRIEF"; exit 1; }
+[ -f "$RULES" ] || { echo "no rules at $RULES"; exit 1; }
 if tmux has-session -t "=$T" 2>/dev/null; then echo "already running: tmux session $T"; exit 0; fi
 
 if [ "${HF_WORKER_TRUST:-0}" = 1 ]; then
@@ -43,5 +50,8 @@ if [ -n "${HF_WORKER_EXTRA:-}" ] && [ -f "$HF_WORKER_EXTRA" ]; then PROMPT="$PRO
 
 $(cat "$HF_WORKER_EXTRA")"; fi
 PROMPT="${PROMPT//\{NAME\}/$NAME}"
+SYS="$(cat "$RULES")"; SYS="${SYS//\{ESCALATE\}/$ESCALATE}"
+# The worker is hidden, so it must never block on an in-session question.
 tmux new-session -d -s "$T" -n worker -c "$DIR" -x 200 -y 50 \
-  claude --remote-control "$NAME" -n "$NAME" "$PROMPT" && echo "started \"$NAME\" in tmux session $T ($DIR)"
+  claude --remote-control "$NAME" -n "$NAME" --disallowedTools AskUserQuestion \
+  --append-system-prompt "$SYS" "$PROMPT" && echo "started \"$NAME\" in tmux session $T ($DIR)"
