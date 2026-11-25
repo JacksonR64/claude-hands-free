@@ -1,0 +1,29 @@
+#!/usr/bin/python3 -I
+# Handy transcription hook: stdin = transcript, stdout = corrected text.
+# Pairs live in replacements.txt beside this file. Any error -> echo input unchanged.
+import os, re, sys
+
+def main():
+    raw = sys.stdin.buffer.read()
+    try:
+        text = raw.decode("utf-8")
+        here = os.path.dirname(os.path.realpath(__file__))
+        pairs = []
+        with open(os.path.join(here, "replacements.txt"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=>" not in line:
+                    continue
+                wrong, right = (s.strip() for s in line.split("=>", 1))
+                if wrong:
+                    pairs.append((wrong, right))
+        pairs.sort(key=lambda p: -len(p[0]))
+        for wrong, right in pairs:
+            pat = r"(?<!\w)" + r"\s+".join(map(re.escape, wrong.split())) + r"(?!\w)"
+            text = re.sub(pat, lambda m: right, text, flags=re.IGNORECASE)
+        sys.stdout.write(text)
+    except Exception:
+        sys.stdout.buffer.write(raw)
+
+if __name__ == "__main__":
+    main()
