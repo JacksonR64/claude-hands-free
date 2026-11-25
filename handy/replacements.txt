@@ -54,9 +54,13 @@ homez => homeZ
 designz => designZ
 toolz => toolZ
 wall tattz => wall tattZ
-# Added 2026-11-25: Mac Z (bare "Mac" stays unchanged)
-max zed => Mac Z
-mac zed => Mac Z
-max z => Mac Z
-maxes => Mac Z
-max => Mac Z
+# Added 2026-11-25: macZ (bare "Mac" stays unchanged)
+max zed => macZ
+mac zed => macZ
+mack zed => macZ
+max z => macZ
+mac z => macZ
+mack z => macZ
+maxes => macZ
+max => macZ
+macz => macZ
