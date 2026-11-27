@@ -191,6 +191,20 @@ func panelSelfTests() {
     other.waiting = false
     assert(book.apply(other).number == 0 && book.waiting.map(\.number) == [3])
     assert(speakable("**Done** see [the PR](https://x.y/z) `code`") == "Done see the PR code")
+    func node(_ depth: Int, _ role: String, _ title: String = "", _ value: String = "") -> WindowNode { WindowNode(depth: depth, role: role, title: title, value: value) }
+    let window = parseWindowMessages([
+        node(1, "AXGroup", "Primary pane"), node(2, "AXGroup", "Chat messages"),
+        node(3, "AXGroup", "Message 7"), node(4, "AXHeading", "You said: Is it done?"), node(5, "AXStaticText", "", "You said: Is it done?"), node(5, "AXStaticText", "", "Is it done?"),
+        node(3, "AXGroup", "Message 8"), node(4, "AXHeading", "Claude responded: Yes."), node(5, "AXStaticText", "", "Claude responded: Yes."),
+        node(5, "AXStaticText", "", "Yes. Shall I"), node(5, "AXStaticText", "", "merge it?"), node(5, "AXButton", "Show message actions for Claude responded: Yes."), node(5, "AXStaticText", "", "2:33 AM"),
+        node(1, "AXGroup", "Fix export"), node(2, "AXGroup", "Threads"), node(3, "AXGroup", "Thread messages"),
+        node(4, "AXGroup", "Message 1"), node(5, "AXHeading", "Claude responded: Working on it."), node(6, "AXStaticText", "", "Working on it."),
+        node(1, "AXGroup", "Elsewhere"), node(2, "AXGroup", "Message 3"), node(3, "AXHeading", "Claude responded: ignored")])
+    assert(window.count == 3, "Only the project chat and the thread panel are read")
+    assert(!window[0].fromClaude && !window[0].inThread && window[0].body == "Is it done?")
+    assert(window[1].fromClaude && window[1].body == "Yes. Shall I merge it?", "Timestamps and the repeated heading are not part of the reply")
+    assert(window[2].inThread && window[2].threadTitle == "Fix export" && window[2].body == "Working on it.")
+    assert(looksLikeTimestamp("Nov 26, 10:41 PM") && looksLikeTimestamp("Friday, November 27, 2026") && !looksLikeTimestamp("At 2:33 AM we deploy"))
     store.demoEvent("quiet")
     store.book = ThreadBook(); store.book.apply(drop)
     speak("who's waiting")

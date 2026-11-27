@@ -1,5 +1,12 @@
 # Changelog
 
+
+## Window reader (free route), 27 November 2026
+
+- The Sender helper gained a watch mode (`--watch <dir> <panel pid>`). Every two seconds it writes what the Claude desktop window shows to `claude-window.json`; the panel reads new Claude replies from it aloud and lists them under "waiting on you". No thread has to do anything, so it costs no usage.
+- It sees only the project chat and thread that are on screen. First sight of a chat is a silent baseline. A drop for the same thread within 90 seconds is treated as the same message.
+- Setting `watchWindow` (default true). The panel shows an orange note until "Claude Hands Free Sender" is allowed under Accessibility.
+
 ## Unreleased
 
 - **Project threads.** Cloud project threads cannot load the mod, so they drop one small JSON file per message into an inbox folder on the Mac (`threadInbox` in `~/.config/read-aloud/settings.json`, default `~/.cache/read-aloud/threads/inbox`). The app reads each one aloud itself, with the project and thread name first, through the same one-voice-at-a-time lock the sessions use.

@@ -6,6 +6,63 @@ import Cocoa
 import ApplicationServices
 
 let claudeBundle = "com.anthropic.claudefordesktop"
+
+// Watch mode: read-aloud-send --watch <state dir> <owner pid>
+// Every two seconds, write what the Claude desktop window is showing (page address, and the titled or texted elements
+// outside the sidebar) to claude-window.json, so the panel can read new replies aloud without any thread's help.
+// Nothing is typed or clicked in this mode. It stops when the panel that started it exits.
+func snapshotPages() -> [[String: Any]] {
+    guard let app = claude() else { return [] }
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    var pages: [[String: Any]] = []
+    func gather(_ e: AXUIElement, _ depth: Int, _ nodes: inout [[Any]]) {
+        guard depth < 70, nodes.count < 4000 else { return }
+        let role = attr(e, "AXRole") as? String ?? ""
+        let title = String((attr(e, "AXTitle") as? String ?? "").prefix(300))
+        if role == "AXGroup" && title == "Sidebar" { return }
+        let value = role == "AXStaticText" ? String((attr(e, "AXValue") as? String ?? "").prefix(1500)) : ""
+        if !title.isEmpty || !value.isEmpty { nodes.append([depth, role, title, value]) }
+        for child in (attr(e, "AXChildren") as? [AXUIElement]) ?? [] { gather(child, depth + 1, &nodes) }
+    }
+    func find(_ e: AXUIElement, _ depth: Int) {
+        guard depth < 30 else { return }
+        if attr(e, "AXRole") as? String == "AXWebArea", let url = (attr(e, "AXURL") as? URL)?.absoluteString, url.contains("claude.ai/") {
+            var nodes: [[Any]] = []
+            gather(e, 0, &nodes)
+            pages.append(["url": url, "title": attr(e, "AXTitle") as? String ?? "", "nodes": nodes])
+            return
+        }
+        for child in (attr(e, "AXChildren") as? [AXUIElement]) ?? [] { find(child, depth + 1) }
+    }
+    for window in (attr(ax, "AXWindows") as? [AXUIElement]) ?? [] { find(window, 0) }
+    return pages
+}
+func watch(_ dir: String, _ owner: Int32) -> Never {
+    let path = dir + "/claude-window.json"
+    var last = Data()
+    var lastWrite = Date.distantPast
+    var asked = false
+    while true {
+        if kill(owner, 0) != 0 { try? FileManager.default.removeItem(atPath: path); exit(0) }
+        let trusted = AXIsProcessTrusted()
+        if !trusted && !asked { asked = true; _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
+        let pages = trusted ? snapshotPages() : []
+        let body = (try? JSONSerialization.data(withJSONObject: pages)) ?? Data()
+        if body != last || Date().timeIntervalSince(lastWrite) > 10 {
+            last = body; lastWrite = Date()
+            let whole: [String: Any] = ["ts": Date().timeIntervalSince1970, "trusted": trusted, "pages": pages]
+            if let data = try? JSONSerialization.data(withJSONObject: whole) {
+                try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            }
+        }
+        sleep(trusted ? 2 : 5)
+    }
+}
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--watch", let owner = Int32(CommandLine.arguments[3]) {
+    watch(CommandLine.arguments[2], owner)
+}
 guard CommandLine.arguments.count == 2 else { print("usage: read-aloud-send <request.json>"); exit(64) }
 let requestPath = CommandLine.arguments[1]
 guard let data = FileManager.default.contents(atPath: requestPath),

@@ -31,6 +31,7 @@ struct Settings {
     var wake = "okay claude"
     var dictation = "apple"   // or "handy"
     var sendDelay = 5.0
+    var watchWindow = true   // read new replies straight from the Claude desktop window (free; needs the Sender's Accessibility permission)
     var threadInbox = "~/.cache/read-aloud/threads/inbox"   // project threads drop their messages here (see Threads.swift)
 }
 func loadSettings() -> Settings {
@@ -42,6 +43,7 @@ func loadSettings() -> Settings {
         s.captions = j["captions"] as? Bool ?? true; s.follow = j["follow"] as? Bool ?? false
         s.voice = j["voice"] as? Bool ?? false; s.wake = j["wake"] as? String ?? "okay claude"
         s.dictation = j["dictation"] as? String ?? "apple"; s.sendDelay = j["sendDelay"] as? Double ?? 5
+        s.watchWindow = j["watchWindow"] as? Bool ?? true
         if let inbox = j["threadInbox"] as? String, !inbox.isEmpty { s.threadInbox = inbox }
     }
     if demo { s.voice = false }
@@ -261,6 +263,11 @@ final class Store: ObservableObject {
     var lastThreadScan = 0.0, lastAppSpeechEnd = 0.0
     var holdingSpeechLock = false
     var queueWaitingSince = 0.0
+    var windowSeen: [String: Set<String>] = [:]
+    var windowPending: [String: Double] = [:]
+    var lastAnnounced: [String: Double] = [:]
+    var lastWindowScan = 0.0, lastWindowStamp = 0.0
+    @Published var windowTrusted = true
     var appSay: ((String) -> Void)?
     var appStop: (() -> Void)?
     var appSpeechBusy: (() -> Bool)?
@@ -725,6 +732,10 @@ struct Card: View {
                 if store.settings.captions && !s.text.isEmpty { Text(s.text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3) }
             }
             if let s = store.selected, s.phase == "queued" { Button("Read reply") { store.send("play", s) }.controlSize(.small) }
+            if !demo && store.settings.watchWindow && !store.windowTrusted {
+                Text("To read Claude's replies aloud, turn on “Claude Hands Free Sender” in System Settings › Privacy & Security › Accessibility.")
+                    .font(.system(size: 10, weight: .medium)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
             Text(store.notice).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !store.delivery.isEmpty { Text(store.delivery).font(.system(size: 10, weight: .medium)).fixedSize(horizontal: false, vertical: true) }
             HStack {
@@ -892,12 +903,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             store.appStop = { [weak self] in self?.demoSpeaker.stop() }
             store.appSpeechBusy = { [weak self] in self?.demoSpeaker.process != nil }
             store.loadBook()
+            startWindowWatcher()
         }
         store.refresh(); tick()
         if demo || !CommandLine.arguments.contains("--background") || wasQuit { showWindow() }
         applyVoice()
         Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in self.tick() }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.store.refreshAudio() }
+    }
+
+    // The Sender helper, in watch mode, snapshots the Claude window for scanWindow(). It is its own app so that its
+    // Accessibility permission is asked for and remembered separately; it exits when this panel does.
+    func startWindowWatcher() {
+        guard !demo, store.settings.watchWindow else { return }
+        let stop = Process(); stop.executableURL = URL(fileURLWithPath: "/usr/bin/pkill"); stop.arguments = ["-f", "read-aloud-send --watch"]
+        if (try? stop.run()) != nil { stop.waitUntilExit() }
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-n", "-g", "-a", NSHomeDirectory() + "/.cache/read-aloud/ReadAloudSend.app", "--args", "--watch", voiceDir, String(ProcessInfo.processInfo.processIdentifier)]
+        try? p.run()
     }
 
     @objc func toggleStatus() {
@@ -1042,7 +1065,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
         }
         store.refresh(); tailVoice(); store.tickHandy()
-        store.scanThreads(); store.tickSpeech()
+        store.scanThreads(); store.scanWindow(); store.tickSpeech()
         // "Read replies aloud" off is enforced here too: a session still running an older copy of the mod reads regardless, so stop it
         if !demo && !store.settings.reading, let reading = store.speaking, Date().timeIntervalSince(lastReadingStop) > 2 {
             lastReadingStop = Date(); store.send("stop", reading)

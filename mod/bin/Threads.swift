@@ -73,6 +73,54 @@ func speakable(_ text: String, limit: Int = 1500) -> String {
     return s.count > limit ? String(s.prefix(limit)) + ". The rest is in the thread." : s
 }
 
+// ---- The free route: the Sender helper snapshots what the Claude desktop window shows (send.swift, watch mode) and the
+// panel picks new replies out of it. It only sees the project and thread that are on screen.
+struct WindowNode { let depth: Int, role: String, title: String, value: String }
+struct WindowMessage: Equatable {
+    let inThread: Bool, threadTitle: String, fromClaude: Bool, head: String, body: String
+    var key: String { "\(head)|\(body.prefix(160))" }
+}
+func looksLikeTimestamp(_ text: String) -> Bool {
+    text.range(of: "^((Today|Yesterday) at )?\\d{1,2}:\\d{2}\\s?[AP]M$|^[A-Z][a-z]{2} \\d{1,2}, \\d{1,2}:\\d{2}\\s?[AP]M$|^[A-Z][a-z]+day, [A-Z][a-z]+ \\d{1,2}, \\d{4}$",
+               options: .regularExpression) != nil
+}
+func parseWindowMessages(_ nodes: [WindowNode]) -> [WindowMessage] {
+    var stack: [WindowNode] = []
+    var out: [WindowMessage] = []
+    for (i, n) in nodes.enumerated() {
+        while let top = stack.last, top.depth >= n.depth { stack.removeLast() }
+        defer { stack.append(n) }
+        guard n.role == "AXGroup", n.title.range(of: "^Message \\d+$", options: .regularExpression) != nil else { continue }
+        let groups = stack.filter { $0.role == "AXGroup" }
+        let inThread = groups.contains { $0.title == "Thread messages" }
+        guard inThread || groups.contains(where: { $0.title == "Chat messages" }) else { continue }
+        var threadTitle = ""
+        if inThread, let t = groups.firstIndex(where: { $0.title == "Threads" }), t > 0 { threadTitle = groups[t - 1].title }
+        var head = "", fromClaude = false, parts: [String] = []
+        var j = i + 1
+        while j < nodes.count, nodes[j].depth > n.depth {
+            let m = nodes[j]; j += 1
+            if m.role == "AXHeading", head.isEmpty {
+                if m.title.hasPrefix("Claude responded: ") { fromClaude = true; head = String(m.title.dropFirst(18)) }
+                else if m.title.hasPrefix("You said: ") { head = String(m.title.dropFirst(10)) }
+                continue
+            }
+            if m.role == "AXButton", m.title.hasPrefix("Show message actions") { break }
+            if m.role == "AXStaticText", !head.isEmpty, !m.value.hasPrefix("Claude responded: "), !m.value.hasPrefix("You said: "),
+               !looksLikeTimestamp(m.value) { parts.append(m.value) }
+        }
+        guard !head.isEmpty else { continue }
+        let body = parts.joined(separator: " ").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+        out.append(WindowMessage(inThread: inThread, threadTitle: threadTitle, fromClaude: fromClaude, head: head, body: body.isEmpty ? head : body))
+    }
+    return out
+}
+func firstMatch(_ pattern: String, in text: String) -> String? {
+    guard let regex = try? NSRegularExpression(pattern: pattern), let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+          m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: text) else { return nil }
+    return String(text[r])
+}
+
 enum WaitingEntry { case thread(ThreadItem), session(S) }
 struct WaitingRow: Identifiable {
     let number: Int, name: String, detail: String, entry: WaitingEntry
@@ -150,7 +198,66 @@ extension Store {
         }
         if changed { book.prune(now: now); saveBook() }
     }
+    // New replies in the window: the first sight of a chat is only a baseline, so opening an old thread reads nothing out.
+    func scanWindow(now: Double = Date().timeIntervalSince1970) {
+        guard !demo, settings.watchWindow, now - lastWindowScan >= 2 else { return }
+        lastWindowScan = now
+        guard let data = FileManager.default.contents(atPath: voiceDir + "/claude-window.json"),
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let ts = j["ts"] as? Double, ts != lastWindowStamp else { return }
+        lastWindowStamp = ts
+        windowTrusted = j["trusted"] as? Bool ?? false
+        var changed = false
+        for page in (j["pages"] as? [[String: Any]]) ?? [] {
+            let url = page["url"] as? String ?? ""
+            guard let projectID = firstMatch("/project/(chan_[A-Za-z0-9]+)", in: url), validCloudID(projectID, prefix: "chan_") else { continue }
+            let threadID = firstMatch("[?&]thread=(cmsg_[A-Za-z0-9]+)", in: url) ?? ""
+            var project = page["title"] as? String ?? ""
+            if project.hasSuffix(" - Claude Code") { project = String(project.dropLast(14)) }
+            let nodes = ((page["nodes"] as? [[Any]]) ?? []).compactMap { n -> WindowNode? in
+                guard n.count == 4, let depth = n[0] as? Int, let role = n[1] as? String, let title = n[2] as? String, let value = n[3] as? String else { return nil }
+                return WindowNode(depth: depth, role: role, title: title, value: value)
+            }
+            let messages = parseWindowMessages(nodes)
+            for inThread in [false, true] {
+                let list = messages.filter { $0.inThread == inThread }
+                guard !list.isEmpty, !inThread || !threadID.isEmpty else { continue }
+                let container = projectID + "/" + (inThread ? threadID : "")
+                guard var known = windowSeen[container] else { windowSeen[container] = Set(list.map(\.key)); continue }
+                for (index, m) in list.enumerated() where !known.contains(m.key) {
+                    if index < list.count - 3 { known.insert(m.key); continue }   // older history scrolled into view
+                    let pending = container + "|" + m.key
+                    guard let first = windowPending[pending] else { windowPending[pending] = now; continue }
+                    guard now - first >= 1.5 else { continue }   // still the same after a second look: not half-written
+                    windowPending.removeValue(forKey: pending); known.insert(m.key)
+                    if !m.fromClaude {   // answered by typing: no longer waiting
+                        if book.items.contains(where: { $0.id == container && $0.waiting }) { book.clear(container); changed = true }
+                        continue
+                    }
+                    let text = String(m.body.prefix(700))
+                    let drop = ThreadItem(projectID: projectID, threadID: inThread ? threadID : "", project: project, thread: inThread ? m.threadTitle : "",
+                                          text: text, waiting: text.contains("?"), ts: now, number: 0)
+                    let recent = lastAnnounced[container].map { now - $0 < 90 } ?? false   // the thread also dropped a file for this
+                    let item = recent ? drop : book.apply(drop, alsoUsed: Set(sessionNumbers.values))
+                    changed = changed || !recent
+                    threadLog("window \(item.name) waiting=\(item.waiting) duplicate=\(recent)")
+                    if !recent { announce(item, limit: 600) }
+                }
+                windowSeen[container] = known
+            }
+        }
+        if windowPending.count > 300 { windowPending.removeAll() }
+        if changed { book.prune(now: now); saveBook() }
+    }
+    func announce(_ item: ThreadItem, limit: Int) {
+        lastAnnounced[item.id] = item.ts
+        threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
+        notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
+        guard settings.reading else { return }
+        speechQueue.append("\(item.name). \(speakable(item.text, limit: limit))" + (item.waiting ? " Waiting on you. Number \(item.number)." : ""))
+    }
     func announce(_ item: ThreadItem) {
+        if let seen = lastAnnounced[item.id], item.ts - seen < 90 { lastAnnounced[item.id] = item.ts; return }   // already read from the window
+        lastAnnounced[item.id] = item.ts
         threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
         notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
         guard settings.reading else { return }

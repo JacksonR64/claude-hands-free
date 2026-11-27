@@ -77,3 +77,7 @@ Do not spend Claude usage, enable a mic, send real task prompts, or exercise phy
 Read [TASKS.md](../TASKS.md), start with the bounded manual trial, and record observed transcript/timing separately from hypotheses. Keep fixes small, maintain the existing flows and isolate demo state. Implementing a second backend, rewriting the UI or distributing unsigned public binaries is not the next milestone.
 
 For a Claude handoff prompt: “Read AGENTS.md, docs/HANDOFF.md, TASKS.md and docs/TESTING.md. Check git status and current installation before changing anything. Continue the local reliability milestone. Keep microphones off until I start a trial; do not use paid test calls without asking. Edit the checkout, test it, install with a backup, and update the tracked handoff.”
+
+## Window reader, 27 November 2026
+
+The panel starts `ReadAloudSend.app --watch` at launch (live mode only). `scanWindow()` in `mod/bin/Threads.swift` parses `claude-window.json` with `parseWindowMessages`. Limits: only the visible project chat and open thread are read; the Sender needs Accessibility again whenever `send.swift` changes, because the grant follows the ad hoc signature. Not yet tried by Jackson. The drop folder still works for threads that are not on screen.
