@@ -30,6 +30,60 @@ struct PanelPresentation {
 
 enum VoiceIntent: Equatable {
     case startDictation, next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
+    // The numbered "waiting on you" list: project threads and sessions that need an answer.
+    case whoIsWaiting, replyTo(Int, String), readItem(Int), openItem(Int), dismissItem(Int)
+}
+
+let numberWords: [String: Int] = ["one": 1, "won": 1, "two": 2, "too": 2, "three": 3, "four": 4, "for": 4, "fore": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "ate": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5]
+func spokenNumber(_ word: String) -> Int? {
+    if let n = Int(word) { return n > 0 && n < 100 ? n : nil }
+    return numberWords[word]
+}
+
+// "reply to number four, yes go ahead" / "read number two" / "open 3" / "dismiss number one".
+// A reply keeps the speaker's own wording; anything that is not clearly a numbered command stays ordinary dictation.
+func numberedCommand(_ transcript: String, wake: String = "okay claude") -> VoiceIntent? {
+    let raw = transcript.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    var words: [(word: String, index: Int)] = []
+    for (index, token) in raw.enumerated() { for word in normalized(token).split(separator: " ") { words.append((String(word), index)) } }
+    var i = 0
+    func starts(_ phrase: String) -> Bool {
+        let parts = phrase.split(separator: " ").map(String.init)
+        return !parts.isEmpty && i + parts.count <= words.count && zip(parts, words[i...]).allSatisfy { $0 == $1.word }
+    }
+    func skip(_ phrases: [String]) -> Bool {
+        for phrase in phrases where starts(phrase) { i += phrase.split(separator: " ").count; return true }
+        return false
+    }
+    _ = skip([normalized(wake), "okay claude", "ok claude", "hey claude", "okay", "ok"])
+    while skip(["i ll", "i will", "i want to", "i d like to", "let me", "can you", "could you", "please", "and", "now"]) {}
+    guard i < words.count else { return nil }
+    let verb = words[i].word; i += 1
+    let replying = ["reply", "respond", "answer", "tell", "message"].contains(verb)
+    guard replying || ["read", "play", "open", "show", "dismiss", "clear", "skip"].contains(verb) else { return nil }
+    let hadTo = skip(["to"])
+    _ = skip(["the"])
+    let hadKeyword = skip(["number", "numbers", "thread", "item"])
+    guard i < words.count else { return nil }
+    guard let number = spokenNumber(words[i].word) ?? (hadKeyword && words[i].word == "to" ? 2 : nil) else { return nil }
+    let last = words[i].index; i += 1
+    if replying {
+        // "tell 5 people" is a message; "reply to four" and "tell number four" are commands
+        guard hadKeyword || (hadTo && ["reply", "respond"].contains(verb)) else { return nil }
+        var rest = Array(raw[(last + 1)...])
+        if let first = rest.first, normalized(first) == "saying" { rest.removeFirst() }
+        let text = rest.joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.:;!?-"))
+        return .replyTo(number, text)
+    }
+    guard i == words.count else { return nil }   // "read 3 files in the repo" is a message
+    switch verb {
+    case "read", "play": return .readItem(number)
+    case "open", "show": return .openItem(number)
+    default: return .dismissItem(number)
+    }
 }
 
 func normalized(_ text: String) -> String {
@@ -55,8 +109,13 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     case "approve action", "allow action": return .approve
     case "deny action", "reject action": return .deny
     case "cancel message", "discard message": return .cancel
+    case "who s waiting", "who is waiting", "whos waiting", "what s waiting", "what is waiting", "who s waiting for me", "who is waiting for me",
+         "who s waiting on me", "who is waiting on me", "what s waiting on me", "what s waiting for me", "who needs me", "what needs me",
+         "waiting list", "list waiting", "anything waiting", "is anything waiting", "who needs a reply", "what needs my attention":
+        return .whoIsWaiting
     default: break
     }
+    if let command = numberedCommand(transcript, wake: wake) { return command }
     for prefix in ["switch to ", "move to ", "go to ", "select session "] where text.hasPrefix(prefix) {
         var name = String(text.dropFirst(prefix.count))
         if name.hasPrefix("the ") { name = String(name.dropFirst(4)) }

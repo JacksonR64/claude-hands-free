@@ -6,8 +6,8 @@ C="${READ_ALOUD_CACHE:-$HOME/.cache/read-aloud}"
 mkdir -p "$C"
 SWIFT_TARGET="$(uname -m)-apple-macosx14.0"
 stale() { [ ! -e "$1" ] || [ "$2" -nt "$1" ]; }
-if stale "$C/read-aloud-bar" "$R/bin/build.sh" || stale "$C/read-aloud-bar" "$R/bin/bar.swift" || stale "$C/read-aloud-bar" "$R/bin/VoiceCore.swift"; then
-  swiftc -O -target "$SWIFT_TARGET" "$R/bin/VoiceCore.swift" "$R/bin/bar.swift" -o "$C/read-aloud-bar.new"
+if stale "$C/read-aloud-bar" "$R/bin/build.sh" || stale "$C/read-aloud-bar" "$R/bin/bar.swift" || stale "$C/read-aloud-bar" "$R/bin/VoiceCore.swift" || stale "$C/read-aloud-bar" "$R/bin/Threads.swift"; then
+  swiftc -O -target "$SWIFT_TARGET" "$R/bin/VoiceCore.swift" "$R/bin/Threads.swift" "$R/bin/bar.swift" -o "$C/read-aloud-bar.new"
   mv "$C/read-aloud-bar.new" "$C/read-aloud-bar"
 fi
 if stale "$C/read-aloud-keys" "$R/bin/build.sh" || stale "$C/read-aloud-keys" "$R/keys.swift"; then
@@ -61,6 +61,16 @@ if stale "$D/Contents/Resources/ReadAloudDemoListen.app/Contents/MacOS/read-alou
   cp -R "$L" "$D/Contents/Resources/"
   codesign --force --sign - "$D"
 fi
-for app in "$A" "$L" "$P" "$D"; do
+# Types a spoken reply into a project thread in the Claude desktop app. It holds the Accessibility permission, which macOS
+# ties to this exact build, so it is rebuilt only when its own source changes (not when this script does).
+S="$C/ReadAloudSend.app"
+if stale "$S/Contents/MacOS/read-aloud-send" "$R/bin/send.swift" || stale "$S/Contents/Info.plist" "$R/bin/send-Info.plist"; then
+  mkdir -p "$S/Contents/MacOS"
+  swiftc -O -target "$SWIFT_TARGET" "$R/bin/send.swift" -o "$S/Contents/MacOS/read-aloud-send.new"
+  mv "$S/Contents/MacOS/read-aloud-send.new" "$S/Contents/MacOS/read-aloud-send"
+  cp "$R/bin/send-Info.plist" "$S/Contents/Info.plist"
+  codesign --force --sign - "$S"
+fi
+for app in "$A" "$L" "$P" "$D" "$S"; do
   codesign --verify --deep --strict "$app"
 done

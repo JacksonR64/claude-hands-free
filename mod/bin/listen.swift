@@ -20,7 +20,11 @@ func emit(_ event: String, id: String? = nil, text: String? = nil) {
 }
 
 func playbackIsActive() -> Bool {
-    if demo { return FileManager.default.fileExists(atPath: playbackMarker) }
+    // The app's own speech (thread messages, the waiting list) is marked by a file; a marker left by a crash goes stale.
+    if let made = (try? FileManager.default.attributesOfItem(atPath: playbackMarker))?[.modificationDate] as? Date {
+        if demo || Date().timeIntervalSince(made) < 180 { return true }
+    }
+    if demo { return false }
     let files = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
     return files.filter { $0.hasPrefix("s-") && $0.hasSuffix(".json") }.contains { name in
         guard let data = FileManager.default.contents(atPath: root + "/" + name),
@@ -208,6 +212,14 @@ final class Listener {
                     restart(); return
                 }
                 if sendDelay <= 0 { finish() }   // a message: the countdown runs
+                else {
+                    pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
+                    emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
+                }
+            } else if case .replyTo(_, let body) = intent {   // "reply to number four ...": a message for a numbered item
+                if body.isEmpty {   // just the number: the next utterance is the message
+                    finish(); armedUntil = now.addingTimeInterval(15)
+                } else if sendDelay <= 0 { finish() }
                 else {
                     pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
                     emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))

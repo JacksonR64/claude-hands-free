@@ -163,6 +163,53 @@ func panelSelfTests() {
     speak("read again")
     assert(interruptions == 1, "Speaker mode must keep playback gating enabled")
     assert(store.assistantCaption == spoken.last)
+    // The numbered waiting list: project threads and sessions that need an answer
+    assert(voiceIntent("who's waiting") == .whoIsWaiting && voiceIntent("Okay Claude, who is waiting for me?") == .whoIsWaiting)
+    assert(voiceIntent("Reply to number four, yes go ahead and merge it.") == .replyTo(4, "yes go ahead and merge it"))
+    assert(voiceIntent("I'll reply to number 4 this that and the other") == .replyTo(4, "this that and the other"))
+    assert(voiceIntent("reply to two") == .replyTo(2, "") && voiceIntent("reply to number to sounds good") == .replyTo(2, "sounds good"))
+    assert(voiceIntent("tell number three to carry on") == .replyTo(3, "to carry on"))
+    assert(voiceIntent("tell 5 people about it") == .dictate("tell 5 people about it"), "A message that mentions a number is still a message")
+    assert(voiceIntent("read number two") == .readItem(2) && voiceIntent("open 3") == .openItem(3) && voiceIntent("dismiss number one") == .dismissItem(1))
+    assert(voiceIntent("read 3 files in the repo") == .dictate("read 3 files in the repo"))
+    assert(voiceIntent("Clear to black") == .dictate("Clear to black") && voiceIntent("read again") == .readAgain)
+    let drop = parseDrop(Data(#"{"project":"Shop","project_id":"chan_01ABCDEFGH","thread":"Fix export","thread_id":"cmsg_01ABCDEFGH","text":"Shall I merge?","waiting":true}"#.utf8), now: 100)!
+    assert(drop.name == "Shop, Fix export" && drop.url?.absoluteString == "claude://code/project/chan_01ABCDEFGH?thread=cmsg_01ABCDEFGH")
+    assert(parseDrop(Data(#"{"project_id":"chan_../../x","text":"hi"}"#.utf8), now: 1) == nil, "Identifiers go into a link, so they must be plain")
+    assert(parseDrop(Data(#"{"project_id":"chan_01ABCDEFGH","thread_id":"cmsg_1&x=1","text":"hi"}"#.utf8), now: 1) == nil)
+    assert(parseDrop(Data(#"{"project_id":"chan_01ABCDEFGH","waiting":true}"#.utf8), now: 1) == nil, "Nothing to say and waiting is not a message")
+    var book = ThreadBook()
+    let firstItem = book.apply(drop)
+    var other = drop; other.threadID = "cmsg_01ZZZZZZZZ"
+    assert(firstItem.number == 1 && book.apply(other).number == 2)
+    book.clear(firstItem.id)
+    assert(book.waiting.map(\.number) == [2], "An answered thread must not renumber the others")
+    var third = drop; third.threadID = "cmsg_01YYYYYYYY"
+    assert(book.apply(third, alsoUsed: [1]).number == 3, "Sessions share the numbers")
+    other.text = "New question"
+    assert(book.apply(other).number == 2 && book.waiting.first?.text == "New question")
+    other.waiting = false
+    assert(book.apply(other).number == 0 && book.waiting.map(\.number) == [3])
+    assert(speakable("**Done** see [the PR](https://x.y/z) `code`") == "Done see the PR code")
+    store.demoEvent("quiet")
+    store.book = ThreadBook(); store.book.apply(drop)
+    speak("who's waiting")
+    assert(spoken.last?.contains("1 waiting") == true && spoken.last?.contains("Shop, Fix export") == true)
+    speak("read number one")
+    assert(spoken.last?.contains("Shall I merge") == true)
+    speak("reply to number nine go ahead")
+    assert(spoken.last?.contains("no number 9") == true && store.book.waiting.count == 1)
+    speak("reply to number one")
+    assert(store.replyTarget?.number == 1 && store.book.waiting.count == 1)
+    speak("Yes, merge it")
+    assert(store.replyTarget == nil && store.book.waiting.isEmpty, "The next utterance answers the armed number")
+    store.book.apply(drop)
+    speak("Reply to number one, yes merge it")
+    assert(store.book.waiting.isEmpty && store.notice.contains("Nothing was sent"))
+    store.demoEvent("question"); store.refresh()
+    store.book.apply(drop, alsoUsed: Set(store.sessionNumbers.values))
+    assert(Set(store.waitingRows.map(\.number)) == [1, 2], "A session question and a thread share one list")
+    store.demoEvent("quiet"); store.refresh(); store.book = ThreadBook()
     var microphoneStopped = false
     store.voiceChanged = { microphoneStopped = true }
     store.settings.voice = true

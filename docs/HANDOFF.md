@@ -1,12 +1,12 @@
 # Development handoff
 
-Updated 27 October 2026. Current source version: **0.7.0**, early macOS prototype. Start here when continuing in Claude Code or Codex. This file is tracked; no assistant's private memory is needed to understand the project.
+Updated 27 November 2026. Current source version: **0.7.0** plus unreleased work, early macOS prototype. Start here when continuing in Claude Code or Codex. This file is tracked; no assistant's private memory is needed to understand the project.
 
 ## Product and scope
 
 Jackson wants to leave the keyboard alone while several existing Claude Code sessions work: hear a reply, answer a question, say “next session” or “switch to the printers session”, and continue in the selected conversation. Keep waiting quiet. The panel should show who receives speech and who needs attention without taking over the screen.
 
-The project combines a Claude Code mod with a native macOS companion app. It uses the user's existing Claude session and usage. It is not a separate agent backend and does not integrate ordinary Claude Desktop/Projects chats. Jackson's current direction is an MIT open-source portfolio project, local reliability first, broader distribution later. No monetisation work is planned.
+The project combines a Claude Code mod with a native macOS companion app. It uses the user's existing Claude session and usage. It is not a separate agent backend. Project threads are integrated through a drop folder and a sender helper (see below); ordinary Claude chats are not. Jackson's current direction is an MIT open-source portfolio project, local reliability first, broader distribution later. No monetisation work is planned.
 
 ## What exists
 
@@ -27,6 +27,20 @@ Added real-app Dock visibility, standard app-menu Stop/Quit shortcuts, explicit 
 Both app bundles embed their respective listener app and prefer it over the legacy cache location. Builds target the machine's architecture with macOS 14 deployment metadata. A locally compiled Apple Silicon app is not evidence of Intel or macOS 14 runtime compatibility. Signing is ad hoc, without Apple notarisation.
 
 The completed build was installed on the M5 MacBook. Its live window visibly showed microphone off, both stop/quit controls and four registered Code sessions. No microphone or paid model prompt was used for this verification. Deep signature checking caught a stale executable from an earlier demo bundle; the build now removes it, the installer replaces generated bundles completely, and every build verifies all four bundle signatures.
+
+## Project threads: 27 November 2026 (unreleased)
+
+Jackson's main use is now Claude Desktop projects, whose threads run in the cloud and cannot load the mod. Three pieces were added; see the changelog for behaviour.
+
+| Piece | File | Notes |
+| --- | --- | --- |
+| Drop inbox, waiting list, app speech | `mod/bin/Threads.swift` | Threads write `{project, project_id, thread, thread_id, text, waiting}` JSON files; identifiers are validated because they become a link |
+| Voice commands | `mod/bin/VoiceCore.swift`, `mod/bin/listen.swift` | "who's waiting", "reply to number N …", read/open/dismiss number N; a reply with text runs the usual send countdown |
+| Sender | `mod/bin/send.swift` | Opens `claude://code/project/<id>?thread=<id>`, verifies the page address and the reply box through Accessibility, pastes, verifies, presses Return |
+
+Evidence on the M5 MacBook, 27 November 2026: checks passed (9 host mod tests, panel assertions including the new list). A drop written from a cloud thread was consumed, numbered and played aloud. The sender, run from an already-trusted process, typed a test message into a real project thread and it arrived as a user message. Not yet tried: the spoken commands with a live microphone, the sender under its own Accessibility grant, and drops from other projects.
+
+Limits: threads must be told to drop files (Jackson uses an account skill for this); a thread answered by typing stays on the list until it drops again or is dismissed; the sender depends on the Claude desktop app's link format and reply-box labels and fails closed if they change.
 
 ## Source, installation and state
 

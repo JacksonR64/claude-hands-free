@@ -12,7 +12,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 TARGET = Path.home() / '.claude/mods/read-aloud'
 CACHE = Path.home() / '.cache/read-aloud'
 SETTINGS = Path.home() / '.config/read-aloud/settings.json'
-ARTIFACTS = ['read-aloud-bar', 'read-aloud-keys', 'ReadAloudListen.app', 'ReadAloudConversation.app', 'ReadAloudDemo.app', 'ReadAloudDemoListen.app']
+ARTIFACTS = ['read-aloud-bar', 'read-aloud-keys', 'ReadAloudListen.app', 'ReadAloudConversation.app', 'ReadAloudDemo.app', 'ReadAloudDemoListen.app', 'ReadAloudSend.app']
 
 
 def copy(source, target):

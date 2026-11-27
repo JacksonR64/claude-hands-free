@@ -31,6 +31,7 @@ struct Settings {
     var wake = "okay claude"
     var dictation = "apple"   // or "handy"
     var sendDelay = 5.0
+    var threadInbox = "~/.cache/read-aloud/threads/inbox"   // project threads drop their messages here (see Threads.swift)
 }
 func loadSettings() -> Settings {
     var s = Settings()
@@ -41,6 +42,7 @@ func loadSettings() -> Settings {
         s.captions = j["captions"] as? Bool ?? true; s.follow = j["follow"] as? Bool ?? false
         s.voice = j["voice"] as? Bool ?? false; s.wake = j["wake"] as? String ?? "okay claude"
         s.dictation = j["dictation"] as? String ?? "apple"; s.sendDelay = j["sendDelay"] as? Double ?? 5
+        if let inbox = j["threadInbox"] as? String, !inbox.isEmpty { s.threadInbox = inbox }
     }
     if demo { s.voice = false }
     return s
@@ -71,6 +73,7 @@ let panelDisabledPath = dir + "/panel-disabled"
 // The sandbox takes turns so speaker output cannot become a simulated user command.
 final class DemoSpeaker {
     var process: Process?
+    var rate = 185   // words a minute; 0 leaves the system voice at its own pace
     var audioFile: URL?
     var stateChanged: ((Bool) -> Void)?
     var failed: ((String) -> Void)?
@@ -88,7 +91,7 @@ final class DemoSpeaker {
         let file = URL(fileURLWithPath: voiceDir).appendingPathComponent("reply-\(UUID().uuidString).aiff")
         let render = Process()
         render.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        render.arguments = ["-r", "185", "-o", file.path, "--", text]
+        render.arguments = (rate > 0 ? ["-r", String(rate)] : []) + ["-o", file.path, "--", text]
         render.terminationHandler = { [weak self] finished in
             DispatchQueue.main.async {
                 guard let self = self, self.process === finished else { try? FileManager.default.removeItem(at: file); return }
@@ -247,6 +250,19 @@ final class Store: ObservableObject {
     }
     var speechIDs = Set<String>()
     var commands: [String: (String, Date)] = [:]
+    // Project threads and the numbered waiting list (logic in Threads.swift)
+    @Published var book = ThreadBook()
+    @Published var sessionNumbers: [String: Int] = [:]
+    var speechQueue: [String] = []
+    var replyTarget: (number: Int, armedAt: Date)?
+    var sends: [String: (item: String, number: Int, name: String, started: Date)] = [:]
+    var handledDrops = Set<String>()
+    var threadEvents = Set<String>()
+    var lastThreadScan = 0.0, lastAppSpeechEnd = 0.0
+    var holdingSpeechLock = false
+    var appSay: ((String) -> Void)?
+    var appStop: (() -> Void)?
+    var appSpeechBusy: (() -> Bool)?
     var selected: S? { all.first { $0.id == activeID && $0.instance == activeInstance } }
     var speaking: S? { all.first { $0.phase == "speaking" || $0.phase == "paused" } }
     var queued: [S] { all.filter { $0.phase == "queued" } }
@@ -259,6 +275,7 @@ final class Store: ObservableObject {
     func refresh() {
         if demo {
             if all.isEmpty { loadDemo() }
+            refreshNumbers()
             return
         }
         let fm = FileManager.default
@@ -286,6 +303,7 @@ final class Store: ObservableObject {
                 commands.removeValue(forKey: id)
             }
         }
+        refreshNumbers(); pollSends()
     }
     func send(_ verb: String, _ s: S, text: String = "", tracked: Bool = false) {
         if demo {
@@ -390,11 +408,17 @@ final class Store: ObservableObject {
         case .next: move(1)
         case .previous: move(-1)
         case .select(let name): selectNamed(name)
+        case .whoIsWaiting: sayWaiting()
+        case .replyTo(let number, let message): reply(number, message)
+        case .readItem(let number): readRow(number)
+        case .openItem(let number): openRow(number)
+        case .dismissItem(let number): dismissRow(number)
         case .cancel:
+            replyTarget = nil
             notice = "Message discarded."; heard = ""
             if let current = speaking, current.phase == "paused" { send("toggle", current) }
         case .open: if let s = selected { openChat(s) }
-        case .stopSpeech: if let s = speaking { send("stop", s) }; notice = "Speech stopped."
+        case .stopSpeech: if let s = speaking { send("stop", s) }; stopAppSpeech(); notice = "Speech stopped."
         case .pause: if let s = speaking, s.phase == "speaking" { send("toggle", s) }
         case .resume: if let s = speaking, s.phase == "paused" { send("toggle", s) }
         case .approve: answer("approve action", destination: destination, permission: true)
@@ -403,6 +427,10 @@ final class Store: ObservableObject {
             guard let s = validDestination(destination) else { return }
             send("abort", s, tracked: true)
         case .dictate(let message):
+            if let target = replyTarget {   // "reply to number four", then the message
+                replyTarget = nil
+                if !message.isEmpty, Date().timeIntervalSince(target.armedAt) < 90 { reply(target.number, message); return }
+            }
             guard !message.isEmpty, let s = validDestination(destination) else { return }
             if let current = speaking { send("stop", current) }
             if let request = s.pending.first {
@@ -597,7 +625,7 @@ struct Card: View {
                 }.buttonStyle(.plain).help("Hide until you open it again").keyboardShortcut(.escape, modifiers: [])
                 settingsMenu
             }
-            Text(demo ? (store.settings.voice ? (store.demoSpeaking ? "OFFLINE DEMO · speaking · your turn follows" : "OFFLINE DEMO · local speech · no Claude usage") : "OFFLINE DEMO · click microphone for hands-free") : store.settings.voice ? "Listening · say “switch to Printers” or “next session”" : "Microphone off · click the microphone to start")
+            Text(demo ? (store.settings.voice ? (store.demoSpeaking ? "OFFLINE DEMO · speaking · your turn follows" : "OFFLINE DEMO · local speech · no Claude usage") : "OFFLINE DEMO · click microphone for hands-free") : store.settings.voice ? "Listening · say “who's waiting” or “reply to number one …”" : "Microphone off · click the microphone to start")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             AudioActivityView(store: store)
 
@@ -642,6 +670,30 @@ struct Card: View {
                         }
                     }
                 }.frame(maxHeight: 205)
+            }
+            if !store.waitingRows.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("WAITING ON YOU").font(.system(size: 9, weight: .bold)).tracking(0.8).foregroundStyle(.orange)
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(store.waitingRows) { row in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("\(row.number)").font(.system(size: 15, weight: .bold)).monospacedDigit().frame(width: 22)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(row.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                        Text(row.detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Button("Read") { store.readRow(row.number) }
+                                    Button("Open") { store.openRow(row.number) }
+                                }.controlSize(.mini).padding(6)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.06)))
+                                    .contextMenu { Button("Dismiss") { store.dismissRow(row.number) } }
+                            }
+                        }
+                    }.frame(maxHeight: 170)
+                    Text("Say “reply to number \(store.waitingRows[0].number)”, then your message.").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
             }
             if let s = store.selected, let request = s.pending.first {
                 VStack(alignment: .leading, spacing: 8) {
@@ -720,7 +772,7 @@ struct Card: View {
             Toggle("Natural spoken rewrite", isOn: Binding(get: { store.settings.rewrite }, set: { v in store.update { $0.rewrite = v } }))
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
-            Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v, let s = store.speaking { store.send("stop", s) } }))
+            Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v { store.stopAppSpeech() }; if !v, let s = store.speaking { store.send("stop", s) } }))
             if handyInstalled() {
                 Picker("Dictation", selection: Binding(get: { store.settings.dictation }, set: { v in store.update { $0.dictation = v } })) {
                     Text("Apple on-device").tag("apple"); Text("Handy").tag("handy")
@@ -759,7 +811,7 @@ struct CompactTab: View {
                         .font(.system(size: 15, weight: .semibold)).foregroundStyle(store.audioColor)
                         .symbolEffect(.pulse, isActive: store.isSpeaking)
                 }
-                if store.all.contains(where: { !$0.pending.isEmpty }) { Circle().fill(.orange).frame(width: 5, height: 5) }
+                if !store.waitingRows.isEmpty { Circle().fill(.orange).frame(width: 5, height: 5) }
             }.frame(width: store.mode == .edge ? 26 : 36, height: store.mode == .edge ? 48 : 36)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.15), lineWidth: 0.5))
@@ -827,6 +879,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             demoSpeaker.stateChanged = { [weak self] speaking in self?.store.demoSpeaking = speaking }
             demoSpeaker.failed = { [weak self] message in self?.store.notice = message }
             store.demoOutput = { [weak self] text in self?.demoSpeaker.speak(text) }
+        } else {
+            // The app itself speaks project-thread messages and answers to "who's waiting"; sessions still speak their own replies.
+            demoSpeaker.stop()
+            demoSpeaker.stateChanged = { [weak self] speaking in self?.store.demoSpeaking = speaking }
+            demoSpeaker.failed = { [weak self] message in self?.store.notice = message }
+            store.appSay = { [weak self] text in
+                guard let self = self else { return }
+                self.demoSpeaker.rate = self.store.settings.rate; self.demoSpeaker.speak(text)
+            }
+            store.appStop = { [weak self] in self?.demoSpeaker.stop() }
+            store.appSpeechBusy = { [weak self] in self?.demoSpeaker.process != nil }
+            store.loadBook()
         }
         store.refresh(); tick()
         if demo || !CommandLine.arguments.contains("--background") || wasQuit { showWindow() }
@@ -899,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc func stopListening() {
         if !demo, let speech = store.speaking { store.send("stop", speech) }
+        if !demo { store.stopAppSpeech() }
         store.update { $0.voice = false }
         demoSpeaker.stop()
         applyVoice()
@@ -976,18 +1041,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
         }
         store.refresh(); tailVoice(); store.tickHandy()
+        store.scanThreads(); store.tickSpeech()
         // "Read replies aloud" off is enforced here too: a session still running an older copy of the mod reads regardless, so stop it
         if !demo && !store.settings.reading, let reading = store.speaking, Date().timeIntervalSince(lastReadingStop) > 2 {
             lastReadingStop = Date(); store.send("stop", reading)
         }
         if let speech = store.speaking, !speech.text.isEmpty { store.assistantCaption = speech.text }
-        let needsAnswer = store.all.filter { !$0.pending.isEmpty }.count
+        let needsAnswer = store.waitingRows.count
         let symbol = demo ? "ladybug" : needsAnswer > 0 ? "exclamationmark.bubble" : store.settings.voice ? "waveform.circle.fill" : "waveform.circle"
         statusItem?.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Claude Hands Free")
         statusItem?.button?.image?.isTemplate = true
-        statusItem?.button?.toolTip = demo ? "Claude Hands Free Demo · no Claude usage" : needsAnswer > 0 ? "\(needsAnswer) session(s) need your answer" : "Claude Hands Free"
+        statusItem?.button?.toolTip = demo ? "Claude Hands Free Demo · no Claude usage" : needsAnswer > 0 ? "\(needsAnswer) waiting on you" : "Claude Hands Free"
         var events = Set(store.all.flatMap { $0.pending.map { $0.id } })
         for s in store.all where s.ready && s.work == "idle" { events.insert("finished-\(s.id)-\(s.instance)") }
+        if store.threadEvents.count > 200 { store.threadEvents.removeAll() }
+        events.formUnion(store.threadEvents)
         let mouse = NSEvent.mouseLocation
         let inside = (panel?.isVisible == true && panel!.frame.contains(mouse))
             || (compact?.isVisible == true && compact!.frame.contains(mouse)) || popover.isShown
@@ -1060,6 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ n: Notification) {
         suppressBackgroundLaunch()
         demoSpeaker.stop()
+        if store.holdingSpeechLock { rmdir(speechLockPath) }
         stopListening()
         if let item = statusItem { NSStatusBar.system.removeStatusItem(item) }
     }

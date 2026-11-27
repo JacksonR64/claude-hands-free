@@ -52,3 +52,10 @@ On 27 October 2026, the full 0.7.0 check passed on the M5 MacBook: 12 Python tes
 Record version/commit, host version, macOS/input/output devices, interruption setting, exact expected/observed behaviour and approximate timing. Share only a short redacted excerpt if needed. Runtime logs/captions can contain private session text; keep full logs and backups out of GitHub.
 
 If capture stalls, inspect the meter, input name, last buffer time and recognition state before restarting the microphone. Local ad hoc rebuilds may require refreshing that helper's existing Speech Recognition permission in System Settings. Do not reset all Mac permissions, edit TCC databases, kill unrelated audio processes or infer hardware failure from accumulated swap.
+
+## Project threads trial
+
+1. With the app open, drop a file into the thread inbox (see `mod/bin/Threads.swift` for the fields). It should be spoken with its project and thread name and appear under Waiting on you with a number.
+2. Say "who's waiting", then "read number one".
+3. Say "reply to number one, this is a test". After the countdown the Claude desktop app should open that thread and send the words; the item leaves the list and the app says "Sent to number one". The first attempt asks for the Sender's Accessibility permission and sends nothing.
+4. Check the reply box is refused when it already holds a draft, and that an unknown number is refused aloud.

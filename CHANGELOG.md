@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Project threads.** Cloud project threads cannot load the mod, so they drop one small JSON file per message into an inbox folder on the Mac (`threadInbox` in `~/.config/read-aloud/settings.json`, default `~/.cache/read-aloud/threads/inbox`). The app reads each one aloud itself, with the project and thread name first, through the same one-voice-at-a-time lock the sessions use.
+- **Numbered waiting list.** Threads that need an answer, and sessions with a pending question, share one numbered "Waiting on you" list in the panel. A number stays with its item until it is answered or dismissed. Voice: "who's waiting", "read number two", "open number two", "dismiss number two", and "reply to number four, …" (or "reply to number four", a tone, then the message).
+- **Replying to a thread.** A new helper, Claude Hands Free Sender, opens the thread's link in the Claude desktop app, checks the page address and the reply box, pastes the words, checks they arrived and presses Return, so the reply is an ordinary message from the user. It needs the macOS Accessibility permission and is rebuilt only when its own source changes, so the permission survives other updates. The clipboard is put back afterwards.
+- The microphone is also gated while the app itself is speaking.
+
 - Fix: the microphone helper never showed macOS's Speech Recognition / Microphone permission prompt (it sat at "Waiting for…"), because a background app is never frontmost. It now comes to the front while asking, then goes back to the background. `read-aloud-listen --status` prints the current permission state without asking or recording.
 - Fix: the embedded listener crashed ("Read Aloud Conversation quit unexpectedly") as soon as macOS tried to show the permission prompt, because macOS reads the usage descriptions from the outer app, whose Info.plist had none. Both panel apps now carry the Microphone and Speech Recognition descriptions.
 - Fix: with "Wait before reading replies" on, the in-chat band said "Queued to read aloud" with nothing to press. It now says "Ready to read aloud" with a Read now button (the panel's Read reply button did the same for the selected session).
