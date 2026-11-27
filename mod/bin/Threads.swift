@@ -236,7 +236,7 @@ extension Store {
                     let text = String(m.body.prefix(700))
                     let drop = ThreadItem(projectID: projectID, threadID: inThread ? threadID : "", project: project, thread: inThread ? m.threadTitle : "",
                                           text: text, waiting: text.contains("?"), ts: now, number: 0)
-                    let recent = lastAnnounced[container].map { now - $0 < 90 } ?? false   // the thread also dropped a file for this
+                    let recent = lastAnnounced[container].map { now - $0 < 20 } ?? false   // the thread also dropped a file for this
                     let item = recent ? drop : book.apply(drop, alsoUsed: Set(sessionNumbers.values))
                     changed = changed || !recent
                     threadLog("window \(item.name) waiting=\(item.waiting) duplicate=\(recent)")
@@ -256,7 +256,7 @@ extension Store {
         speechQueue.append("\(item.name). \(speakable(item.text, limit: limit))" + (item.waiting ? " Waiting on you. Number \(item.number)." : ""))
     }
     func announce(_ item: ThreadItem) {
-        if let seen = lastAnnounced[item.id], item.ts - seen < 90 { lastAnnounced[item.id] = item.ts; return }   // already read from the window
+        if let seen = lastAnnounced[item.id], item.ts - seen < 20 { lastAnnounced[item.id] = item.ts; return }   // already read from the window
         lastAnnounced[item.id] = item.ts
         threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
         notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
