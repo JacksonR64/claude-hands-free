@@ -31,6 +31,7 @@ struct Settings {
     var wake = "okay claude"
     var dictation = "apple"   // or "handy"
     var sendDelay = 5.0
+    var pauseMedia = true    // pause music or video on this Mac while the app talks or takes a message, then carry on
     var watchWindow = true   // read new replies straight from the Claude desktop window (free; needs the Sender's Accessibility permission)
     var threadInbox = "~/.cache/read-aloud/threads/inbox"   // project threads drop their messages here (see Threads.swift)
 }
@@ -44,6 +45,7 @@ func loadSettings() -> Settings {
         s.voice = j["voice"] as? Bool ?? false; s.wake = j["wake"] as? String ?? "okay claude"
         s.dictation = j["dictation"] as? String ?? "apple"; s.sendDelay = j["sendDelay"] as? Double ?? 5
         s.watchWindow = j["watchWindow"] as? Bool ?? true
+        s.pauseMedia = j["pauseMedia"] as? Bool ?? true
         if let inbox = j["threadInbox"] as? String, !inbox.isEmpty { s.threadInbox = inbox }
     }
     if demo { s.voice = false }
@@ -60,7 +62,7 @@ func saveSettings(_ s: Settings) throws {
     var old: [String: Any] = [:]
     if let data = FileManager.default.contents(atPath: settingsPath) { old = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:] }
     old.merge(["rate": s.rate, "gap": s.gap, "reading": s.reading, "rewrite": s.rewrite, "manual": s.manual,
-               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake, "dictation": s.dictation]) { _, new in new }
+               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake, "dictation": s.dictation, "pauseMedia": s.pauseMedia]) { _, new in new }
     try atomicJSON(old, path: settingsPath)
 }
 func openChat(_ s: S) {
@@ -263,6 +265,8 @@ final class Store: ObservableObject {
     var lastThreadScan = 0.0, lastAppSpeechEnd = 0.0
     var holdingSpeechLock = false
     var queueWaitingSince = 0.0
+    var messageExpectedUntil = 0.0, quietSince = 0.0, mediaBusy = false, mediaPausedAt = 0.0
+    @Published var mediaPaused = false
     var windowSeen: [String: Set<String>] = [:]
     var windowPending: [String: Double] = [:]
     var lastAnnounced: [String: Double] = [:], lastDropped: [String: Double] = [:]
@@ -369,7 +373,11 @@ final class Store: ObservableObject {
             update { $0.voice = false }; voiceChanged?(); captures.removeAll(); speechIDs.removeAll(); heard = ""
             return
         }
-        if kind == "diagnostic" { notice = event["text"] as? String ?? "Speech recognition is retrying."; return }
+        if kind == "diagnostic" {
+            notice = event["text"] as? String ?? "Speech recognition is retrying."
+            if notice.hasPrefix("Listening for your message") { messageExpectedUntil = Date().timeIntervalSince1970 + 8 }
+            return
+        }
         if kind == "ready" {
             notice = demo ? "Offline demo. " + (selected.map { demoSummary($0) } ?? "Choose a session.") + "" : "Listening on this Mac. Speak to the selected session."
             if demo { demoSay(notice) }
@@ -784,6 +792,7 @@ struct Card: View {
             Toggle("Natural spoken rewrite", isOn: Binding(get: { store.settings.rewrite }, set: { v in store.update { $0.rewrite = v } }))
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
+            Toggle("Pause music while talking or listening", isOn: Binding(get: { store.settings.pauseMedia }, set: { v in store.update { $0.pauseMedia = v } }))
             Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v { store.stopAppSpeech() }; if !v, let s = store.speaking { store.send("stop", s) } }))
             if handyInstalled() {
                 Picker("Dictation", selection: Binding(get: { store.settings.dictation }, set: { v in store.update { $0.dictation = v } })) {
@@ -1065,7 +1074,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             try? FileManager.default.removeItem(atPath: voiceDir + "/show-panel"); showWindow()
         }
         store.refresh(); tailVoice(); store.tickHandy()
-        store.scanThreads(); store.scanWindow(); store.tickSpeech()
+        store.scanThreads(); store.scanWindow(); store.tickSpeech(); store.tickMedia()
         // "Read replies aloud" off is enforced here too: a session still running an older copy of the mod reads regardless, so stop it
         if !demo && !store.settings.reading, let reading = store.speaking, Date().timeIntervalSince(lastReadingStop) > 2 {
             lastReadingStop = Date(); store.send("stop", reading)

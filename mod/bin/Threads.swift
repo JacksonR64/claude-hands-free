@@ -207,6 +207,53 @@ extension Store {
         }
         if changed { book.prune(now: now); saveBook() }
     }
+    // Background music gets into the microphone and is hard to hear a reply over. While the app or a session is talking, or a
+    // message is being taken, whatever is playing on this Mac (AirPlay included) is paused; it carries on a moment afterwards.
+    // Only media this app paused is started again. osascript does the asking because macOS refuses other unsigned callers.
+    func mediaCommand(_ pause: Bool, done: @escaping (Bool) -> Void) {
+        let script = """
+        ObjC.import('Foundation');
+        $.NSBundle.bundleWithPath('/System/Library/PrivateFrameworks/MediaRemote.framework').load;
+        ObjC.bindFunction('MRMediaRemoteSendCommand', ['bool', ['int', 'id']]);
+        var playing = $.NSClassFromString('MRNowPlayingRequest').localIsPlaying;
+        if (\(pause ? "playing" : "!playing")) $.MRMediaRemoteSendCommand(\(pause ? 1 : 0), $());
+        playing ? 'playing' : 'stopped';
+        """
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(), out = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); p.arguments = ["-l", "JavaScript", "-e", script]
+            p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            var wasPlaying = false
+            if (try? p.run()) != nil {
+                let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                p.waitUntilExit(); wasPlaying = text.contains("playing")
+            }
+            DispatchQueue.main.async { done(wasPlaying) }
+        }
+    }
+    func tickMedia(now: Double = Date().timeIntervalSince1970) {
+        guard !demo, !mediaBusy else { return }
+        let armed = replyTarget.map { Date().timeIntervalSince($0.armedAt) < 20 } ?? false
+        let wantQuiet = settings.pauseMedia && (isSpeaking || (appSpeechBusy?() ?? false) || !speechQueue.isEmpty
+            || (settings.voice && (armed || sendEndsAt != nil || handyHeld != nil || now < messageExpectedUntil)))
+        if wantQuiet {
+            let rising = quietSince == 0
+            quietSince = now
+            guard rising, !mediaPaused else { return }
+            mediaBusy = true
+            mediaCommand(true) { [weak self] wasPlaying in
+                guard let self = self else { return }
+                self.mediaBusy = false
+                if wasPlaying { self.mediaPaused = true; self.mediaPausedAt = now; threadLog("media paused") }
+            }
+        } else {
+            guard quietSince > 0, now - quietSince >= 2.5 else { return }
+            quietSince = 0
+            guard mediaPaused else { return }
+            mediaPaused = false; mediaBusy = true
+            mediaCommand(false) { [weak self] _ in self?.mediaBusy = false; threadLog("media resumed") }
+        }
+    }
     // New replies in the window: the first sight of a chat is only a baseline, so opening an old thread reads nothing out.
     func scanWindow(now: Double = Date().timeIntervalSince1970) {
         guard !demo, settings.watchWindow, now - lastWindowScan >= 2 else { return }
