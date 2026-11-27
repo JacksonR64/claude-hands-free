@@ -82,6 +82,17 @@ struct WaitingRow: Identifiable {
 let speechLockPath = "/tmp/read-aloud.lock"   // shared with every session's mod: one voice at a time
 func expandedPath(_ path: String) -> String { (path as NSString).expandingTildeInPath }
 
+// One line per event (drop received, spoken, reply sent) so "it didn't read" can be checked. Names only, never message text.
+func threadLog(_ line: String) {
+    guard !demo else { return }
+    let path = voiceDir + "/threads.log"
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    guard let data = "\(stamp) \(line)\n".data(using: .utf8) else { return }
+    if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64, size > 400_000 { try? FileManager.default.removeItem(atPath: path) }
+    if let handle = FileHandle(forWritingAtPath: path) { defer { try? handle.close() }; handle.seekToEndOfFile(); handle.write(data) }
+    else { FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) }
+}
+
 extension Store {
     var bookPath: String { voiceDir + "/threads.json" }
     func loadBook() {
@@ -134,6 +145,7 @@ extension Store {
             let fresh = !drop.text.isEmpty
             let item = book.apply(drop, alsoUsed: Set(sessionNumbers.values))
             changed = true
+            threadLog("drop \(item.name) waiting=\(item.waiting) number=\(item.number) reading=\(settings.reading)")
             if fresh { announce(item) }
         }
         if changed { book.prune(now: now); saveBook() }
@@ -151,12 +163,16 @@ extension Store {
         let busy = appSpeechBusy?() ?? false
         if holdingSpeechLock && !busy { rmdir(speechLockPath); holdingSpeechLock = false; lastAppSpeechEnd = now }
         if !settings.reading { speechQueue.removeAll() }
-        guard !busy, !speechQueue.isEmpty, speaking == nil, speechIDs.isEmpty, handySession == nil, handyHeld == nil,
-              now - lastAppSpeechEnd > 1.5 else { return }
+        guard !busy, !speechQueue.isEmpty, now - lastAppSpeechEnd > 1.5 else { queueWaitingSince = speechQueue.isEmpty ? 0 : queueWaitingSince; return }
+        if queueWaitingSince == 0 { queueWaitingSince = now }
+        // wait for a session's reply or the user's own speech to finish, but never hold a message for more than 30 seconds
+        let blocked = speaking != nil || !speechIDs.isEmpty || handySession != nil || handyHeld != nil
+        if blocked && now - queueWaitingSince < 30 { return }
         if let made = (try? FileManager.default.attributesOfItem(atPath: speechLockPath))?[.modificationDate] as? Date,
            Date().timeIntervalSince(made) > 600 { rmdir(speechLockPath) }
-        guard mkdir(speechLockPath, 0o755) == 0 else { return }
-        holdingSpeechLock = true
+        guard mkdir(speechLockPath, 0o755) == 0 || now - queueWaitingSince > 45 else { return }
+        holdingSpeechLock = true; queueWaitingSince = 0
+        threadLog("speak \(speechQueue[0].prefix(60))")
         let next = speechQueue.removeFirst()
         assistantCaption = next
         appSay?(next)
@@ -247,6 +263,7 @@ extension Store {
                 try? FileManager.default.removeItem(atPath: path)
                 sends.removeValue(forKey: id)
                 let detail = j["detail"] as? String ?? ""
+                threadLog("send \(send.name) status=\(j["status"] as? String ?? "?") \(detail)")
                 switch j["status"] as? String ?? "" {
                 case "sent":
                     book.clear(send.item); saveBook()

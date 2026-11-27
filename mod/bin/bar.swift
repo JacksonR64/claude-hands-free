@@ -260,6 +260,7 @@ final class Store: ObservableObject {
     var threadEvents = Set<String>()
     var lastThreadScan = 0.0, lastAppSpeechEnd = 0.0
     var holdingSpeechLock = false
+    var queueWaitingSince = 0.0
     var appSay: ((String) -> Void)?
     var appStop: (() -> Void)?
     var appSpeechBusy: (() -> Bool)?
