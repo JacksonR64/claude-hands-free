@@ -265,7 +265,7 @@ final class Store: ObservableObject {
     var queueWaitingSince = 0.0
     var windowSeen: [String: Set<String>] = [:]
     var windowPending: [String: Double] = [:]
-    var lastAnnounced: [String: Double] = [:]
+    var lastAnnounced: [String: Double] = [:], lastDropped: [String: Double] = [:]
     var lastWindowScan = 0.0, lastWindowStamp = 0.0
     @Published var windowTrusted = true
     var appSay: ((String) -> Void)?

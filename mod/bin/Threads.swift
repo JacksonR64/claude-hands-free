@@ -96,19 +96,28 @@ func parseWindowMessages(_ nodes: [WindowNode]) -> [WindowMessage] {
         guard inThread || groups.contains(where: { $0.title == "Chat messages" }) else { continue }
         var threadTitle = ""
         if inThread, let t = groups.firstIndex(where: { $0.title == "Threads" }), t > 0 { threadTitle = groups[t - 1].title }
-        var head = "", fromClaude = false, parts: [String] = []
+        var head = "", fromClaude = false, parts: [String] = [], headDepth = 0
+        var table: [String] = []   // a table is exposed three times (by row, by column, then headers); keep the by-row copy
+        func closeTable() {
+            if table.count > 2, let again = table[2...].firstIndex(of: table[0]) { table = Array(table[..<again]) }
+            parts += table; table = []
+        }
         var j = i + 1
         while j < nodes.count, nodes[j].depth > n.depth {
             let m = nodes[j]; j += 1
             if m.role == "AXHeading", head.isEmpty {
                 if m.title.hasPrefix("Claude responded: ") { fromClaude = true; head = String(m.title.dropFirst(18)) }
                 else if m.title.hasPrefix("You said: ") { head = String(m.title.dropFirst(10)) }
+                headDepth = m.depth
                 continue
             }
             if m.role == "AXButton", m.title.hasPrefix("Show message actions") { break }
-            if m.role == "AXStaticText", !head.isEmpty, !m.value.hasPrefix("Claude responded: "), !m.value.hasPrefix("You said: "),
-               !looksLikeTimestamp(m.value) { parts.append(m.value) }
+            if m.role == "AXToolbar", m.title == "Message actions" { break }   // times and status follow; they change, the reply does not
+            guard m.role == "AXStaticText", !head.isEmpty, !m.value.hasPrefix("Claude responded: "), !m.value.hasPrefix("You said: "),
+                  !looksLikeTimestamp(m.value) else { continue }
+            if m.depth >= headDepth + 4 { table.append(m.value) } else { closeTable(); parts.append(m.value) }
         }
+        closeTable()
         guard !head.isEmpty else { continue }
         let body = parts.joined(separator: " ").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
         out.append(WindowMessage(inThread: inThread, threadTitle: threadTitle, fromClaude: fromClaude, head: head, body: body.isEmpty ? head : body))
@@ -235,8 +244,8 @@ extension Store {
                     }
                     let text = String(m.body.prefix(700))
                     let drop = ThreadItem(projectID: projectID, threadID: inThread ? threadID : "", project: project, thread: inThread ? m.threadTitle : "",
-                                          text: text, waiting: text.contains("?"), ts: now, number: 0)
-                    let recent = lastAnnounced[container].map { now - $0 < 20 } ?? false   // the thread also dropped a file for this
+                                          text: text, waiting: m.body.contains("?"), ts: now, number: 0)
+                    let recent = lastDropped[container].map { now - $0 < 20 } ?? false   // the thread also dropped a file for this
                     let item = recent ? drop : book.apply(drop, alsoUsed: Set(sessionNumbers.values))
                     changed = changed || !recent
                     threadLog("window \(item.name) waiting=\(item.waiting) duplicate=\(recent)")
@@ -256,8 +265,8 @@ extension Store {
         speechQueue.append("\(item.name). \(speakable(item.text, limit: limit))" + (item.waiting ? " Waiting on you. Number \(item.number)." : ""))
     }
     func announce(_ item: ThreadItem) {
-        if let seen = lastAnnounced[item.id], item.ts - seen < 20 { lastAnnounced[item.id] = item.ts; return }   // already read from the window
-        lastAnnounced[item.id] = item.ts
+        lastDropped[item.id] = item.ts
+        if let seen = lastAnnounced[item.id], item.ts - seen < 20 { return }   // already read from the window
         threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
         notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
         guard settings.reading else { return }

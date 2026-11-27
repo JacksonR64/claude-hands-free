@@ -200,6 +200,12 @@ func panelSelfTests() {
         node(1, "AXGroup", "Fix export"), node(2, "AXGroup", "Threads"), node(3, "AXGroup", "Thread messages"),
         node(4, "AXGroup", "Message 1"), node(5, "AXHeading", "Claude responded: Working on it."), node(6, "AXStaticText", "", "Working on it."),
         node(1, "AXGroup", "Elsewhere"), node(2, "AXGroup", "Message 3"), node(3, "AXHeading", "Claude responded: ignored")])
+    let tabled = parseWindowMessages([
+        node(1, "AXGroup", "Chat messages"), node(2, "AXGroup", "Message 1"), node(3, "AXHeading", "Claude responded: Done."), node(4, "AXStaticText", "", "Claude responded: Done."),
+        node(5, "AXStaticText", "", "Done."), node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "State"), node(7, "AXStaticText", "", "Build"), node(7, "AXStaticText", "", "Yes"),
+        node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "Build"), node(7, "AXStaticText", "", "State"), node(7, "AXStaticText", "", "Yes"), node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "State"),
+        node(4, "AXStaticText", "", "Did you hear it?"), node(2, "AXToolbar", "Message actions"), node(4, "AXStaticText", "", "2m ago")])
+    assert(tabled.count == 1 && tabled[0].body == "Done. Step State Build Yes Did you hear it?", "A table is read once and the changing time is left out: \(tabled)")
     assert(window.count == 3, "Only the project chat and the thread panel are read")
     assert(!window[0].fromClaude && !window[0].inThread && window[0].body == "Is it done?")
     assert(window[1].fromClaude && window[1].body == "Yes. Shall I merge it?", "Timestamps and the repeated heading are not part of the reply")
