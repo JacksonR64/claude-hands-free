@@ -73,6 +73,15 @@ func speakable(_ text: String, limit: Int = 1500) -> String {
     return s.count > limit ? String(s.prefix(limit)) + ". The rest is in the thread." : s
 }
 
+// the opening sentence of a message, for a headline
+func headline(_ text: String, limit: Int = 160) -> String {
+    let s = speakable(text, limit: 4000)
+    var end = s.endIndex
+    if let r = s.range(of: "[.!?](\\s|$)", options: .regularExpression) { end = r.lowerBound }
+    let first = String(s[..<end])
+    return first.count > limit ? String(first.prefix(limit)) : first
+}
+
 // ---- The free route: the Sender helper snapshots what the Claude desktop window shows (send.swift, watch mode) and the
 // panel picks new replies out of it. It only sees the project and thread that are on screen.
 struct WindowNode { let depth: Int, role: String, title: String, value: String }
@@ -200,7 +209,10 @@ extension Store {
             }
             if (try? fm.removeItem(atPath: path)) == nil { handledDrops.insert(file) }
             let fresh = !drop.text.isEmpty
-            let item = book.apply(drop, alsoUsed: Set(sessionNumbers.values))
+            var incoming = drop
+            // Focus and Headlines: everything unheard gets a number, so it can be opened or read by voice
+            if settings.mode != "everything", fresh, !onScreen.contains(drop.id) { incoming.waiting = true }
+            let item = book.apply(incoming, alsoUsed: Set(sessionNumbers.values))
             changed = true
             threadLog("drop \(item.name) waiting=\(item.waiting) number=\(item.number) reading=\(settings.reading)")
             if fresh { announce(item) }
@@ -233,7 +245,7 @@ extension Store {
     }
     func tickMedia(now: Double = Date().timeIntervalSince1970) {
         guard !demo, !mediaBusy else { return }
-        let armed = replyTarget.map { Date().timeIntervalSince($0.armedAt) < 20 } ?? false
+        let armed = (replyTarget.map { Date().timeIntervalSince($0.armedAt) < 20 } ?? false) || (replyDirect.map { Date().timeIntervalSince($0.armedAt) < 20 } ?? false)
         let wantQuiet = settings.pauseMedia && (isSpeaking || (appSpeechBusy?() ?? false) || !speechQueue.isEmpty
             || (settings.voice && (armed || sendEndsAt != nil || handyHeld != nil || now < messageExpectedUntil)))
         if wantQuiet {
@@ -263,6 +275,9 @@ extension Store {
         lastWindowStamp = ts
         windowTrusted = j["trusted"] as? Bool ?? false
         var changed = false
+        var visible = Set<String>()
+        defer { onScreen = visible }
+        let focused = settings.mode != "everything"
         for page in (j["pages"] as? [[String: Any]]) ?? [] {
             let url = page["url"] as? String ?? ""
             guard let projectID = firstMatch("/project/(chan_[A-Za-z0-9]+)", in: url), validCloudID(projectID, prefix: "chan_") else { continue }
@@ -278,7 +293,22 @@ extension Store {
                 let list = messages.filter { $0.inThread == inThread }
                 guard !list.isEmpty, !inThread || !threadID.isEmpty else { continue }
                 let container = projectID + "/" + (inThread ? threadID : "")
-                guard var known = windowSeen[container] else { windowSeen[container] = Set(list.map(\.key)); continue }
+                visible.insert(container)
+                func item(for m: WindowMessage, waiting: Bool) -> ThreadItem {
+                    ThreadItem(projectID: projectID, threadID: inThread ? threadID : "", project: project, thread: inThread ? m.threadTitle : "",
+                               text: String(m.body.prefix(700)), waiting: waiting, ts: now, number: 0)
+                }
+                guard var known = windowSeen[container] else {
+                    windowSeen[container] = Set(list.map(\.key))
+                    // opened because something was waiting there: read that one message, now that it is on screen
+                    if focused, book.items.contains(where: { $0.id == container && $0.waiting }), let m = list.last, m.fromClaude {
+                        let read = book.apply(item(for: m, waiting: m.body.contains("?")), alsoUsed: Set(sessionNumbers.values))
+                        changed = true
+                        threadLog("window opened \(read.name)")
+                        readOnScreen(read, body: m.body)
+                    }
+                    continue
+                }
                 for (index, m) in list.enumerated() where !known.contains(m.key) {
                     if index < list.count - 3 { known.insert(m.key); continue }   // older history scrolled into view
                     let pending = container + "|" + m.key
@@ -289,9 +319,14 @@ extension Store {
                         if book.items.contains(where: { $0.id == container && $0.waiting }) { book.clear(container); changed = true }
                         continue
                     }
-                    let text = String(m.body.prefix(700))
-                    let drop = ThreadItem(projectID: projectID, threadID: inThread ? threadID : "", project: project, thread: inThread ? m.threadTitle : "",
-                                          text: text, waiting: m.body.contains("?"), ts: now, number: 0)
+                    if settings.mode == "focus" {   // on screen: read this one in full, and drop anything still queued
+                        let read = book.apply(item(for: m, waiting: m.body.contains("?")), alsoUsed: Set(sessionNumbers.values))
+                        changed = true
+                        threadLog("window focus \(read.name)")
+                        readOnScreen(read, body: m.body)
+                        continue
+                    }
+                    let drop = item(for: m, waiting: settings.mode == "headlines" || m.body.contains("?"))
                     let recent = lastDropped[container].map { now - $0 < 20 } ?? false   // the thread also dropped a file for this
                     let item = recent ? drop : book.apply(drop, alsoUsed: Set(sessionNumbers.values))
                     changed = changed || !recent
@@ -304,19 +339,39 @@ extension Store {
         if windowPending.count > 300 { windowPending.removeAll() }
         if changed { book.prune(now: now); saveBook() }
     }
+    // Focus: the message on screen is read in full, alone. Whatever was queued before it is dropped, never read back to back.
+    func readOnScreen(_ item: ThreadItem, body: String) {
+        lastAnnounced[item.id] = item.ts
+        lastRead = item
+        threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
+        notice = "Reading: " + item.name
+        guard settings.reading else { return }
+        speechQueue = [speakable(body, limit: 2500) + (settings.voice ? " End of message. Say reply to answer." : "")]
+    }
+    // what is said for a message in the quieter modes; nil in Everything, which reads it all
+    func shortNotice(_ item: ThreadItem) -> String? {
+        switch settings.mode {
+        case "focus": return "Message waiting from \(item.name). Number \(item.number)."
+        case "headlines": return "\(item.name) says: \(headline(item.text)). Say open number \(item.number) to hear more."
+        default: return nil
+        }
+    }
     func announce(_ item: ThreadItem, limit: Int) {
         lastAnnounced[item.id] = item.ts
         threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
         notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
         guard settings.reading else { return }
+        if let short = shortNotice(item) { speechQueue.append(short); return }
         speechQueue.append("\(item.name). \(speakable(item.text, limit: limit))" + (item.waiting ? " Waiting on you. Number \(item.number)." : ""))
     }
     func announce(_ item: ThreadItem) {
         lastDropped[item.id] = item.ts
         if let seen = lastAnnounced[item.id], item.ts - seen < 20 { return }   // already read from the window
+        if settings.mode == "focus", onScreen.contains(item.id) { return }   // on screen: the window reader reads the real message
         threadEvents.insert("thread-\(item.id)-\(Int(item.ts))")
         notice = (item.waiting ? "Number \(item.number) is waiting: " : "New message: ") + item.name
         guard settings.reading else { return }
+        if let short = shortNotice(item) { speechQueue.append(short); return }
         speechQueue.append("\(item.name). \(speakable(item.text))" + (item.waiting ? " Waiting on you. Number \(item.number)." : ""))
     }
 
@@ -382,6 +437,19 @@ extension Store {
         say("Dismissed number \(number).")
     }
     func reply(_ number: Int, _ text: String) {
+        if number == 0 {   // "reply": to the message that was just read on screen
+            replyTarget = nil
+            guard let item = lastRead else { say("Open a message first, then say reply."); return }
+            if !text.isEmpty { replyDirect = nil; sendToThread(item, number: 0, text: text); return }
+            replyDirect = (item, Date())
+            notice = "Say your reply to \(item.name)."
+            if !demo {
+                stopAppSpeech()
+                NSSound(named: "Tink")?.play()
+                if settings.dictation == "handy" { startHandy(nil) }
+            }
+            return
+        }
         guard let r = row(number) else { replyTarget = nil; return }
         if text.isEmpty {   // "reply to number four" on its own: the next thing said is the message
             replyTarget = (number, Date())
@@ -416,7 +484,7 @@ extension Store {
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/open"); p.arguments = ["-n", "-g", "-a", app, "--args", request]
             try p.run()
             sends[id] = (item.id, number, item.name, Date())
-            delivery = "Sending to number \(number): \(item.name)…"
+            delivery = number == 0 ? "Sending to \(item.name)…" : "Sending to number \(number): \(item.name)…"
         } catch { say("Couldn't start the sender: \(error.localizedDescription)") }
     }
     func pollSends() {

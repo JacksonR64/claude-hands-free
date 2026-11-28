@@ -109,6 +109,7 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     case "approve action", "allow action": return .approve
     case "deny action", "reject action": return .deny
     case "cancel message", "discard message": return .cancel
+    case "reply", "reply to this", "reply to that", "reply to it", "reply to this one": return .replyTo(0, "")
     case "who s waiting", "who is waiting", "whos waiting", "what s waiting", "what is waiting", "who s waiting for me", "who is waiting for me",
          "who s waiting on me", "who is waiting on me", "what s waiting on me", "what s waiting for me", "who needs me", "what needs me",
          "waiting list", "list waiting", "anything waiting", "is anything waiting", "who needs a reply", "what needs my attention":

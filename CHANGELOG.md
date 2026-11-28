@@ -1,6 +1,13 @@
 # Changelog
 
 
+## Reading modes and media pause, 28 November 2026
+
+- Setting `mode` (menu "Reading mode"): `focus` reads only the message on screen, one at a time, and says just "Message waiting from X, number N" for anything else; `headlines` speaks the first sentence and offers "open number N"; `everything` is the earlier behaviour and the default.
+- In Focus and Headlines, opening a waiting thread reads its latest message once it is on screen.
+- "Reply" on its own answers the message that was just read on screen.
+- Setting `pauseMedia` (default true): playing media is paused while the app or a session talks or a message is being taken, and resumed afterwards.
+
 ## Window reader (free route), 27 November 2026
 
 - The Sender helper gained a watch mode (`--watch <dir> <panel pid>`). Every two seconds it writes what the Claude desktop window shows to `claude-window.json`; the panel reads new Claude replies from it aloud and lists them under "waiting on you". No thread has to do anything, so it costs no usage.

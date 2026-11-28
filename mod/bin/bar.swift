@@ -31,6 +31,7 @@ struct Settings {
     var wake = "okay claude"
     var dictation = "apple"   // or "handy"
     var sendDelay = 5.0
+    var mode = "everything"  // "focus": read only the message on screen · "headlines": short notices · "everything": read it all
     var pauseMedia = true    // pause music or video on this Mac while the app talks or takes a message, then carry on
     var watchWindow = true   // read new replies straight from the Claude desktop window (free; needs the Sender's Accessibility permission)
     var threadInbox = "~/.cache/read-aloud/threads/inbox"   // project threads drop their messages here (see Threads.swift)
@@ -46,6 +47,7 @@ func loadSettings() -> Settings {
         s.dictation = j["dictation"] as? String ?? "apple"; s.sendDelay = j["sendDelay"] as? Double ?? 5
         s.watchWindow = j["watchWindow"] as? Bool ?? true
         s.pauseMedia = j["pauseMedia"] as? Bool ?? true
+        if let mode = j["mode"] as? String, ["focus", "headlines", "everything"].contains(mode) { s.mode = mode }
         if let inbox = j["threadInbox"] as? String, !inbox.isEmpty { s.threadInbox = inbox }
     }
     if demo { s.voice = false }
@@ -62,7 +64,7 @@ func saveSettings(_ s: Settings) throws {
     var old: [String: Any] = [:]
     if let data = FileManager.default.contents(atPath: settingsPath) { old = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:] }
     old.merge(["rate": s.rate, "gap": s.gap, "reading": s.reading, "rewrite": s.rewrite, "manual": s.manual,
-               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake, "dictation": s.dictation, "pauseMedia": s.pauseMedia]) { _, new in new }
+               "captions": s.captions, "follow": s.follow, "voice": s.voice, "wake": s.wake, "dictation": s.dictation, "pauseMedia": s.pauseMedia, "mode": s.mode]) { _, new in new }
     try atomicJSON(old, path: settingsPath)
 }
 func openChat(_ s: S) {
@@ -259,6 +261,9 @@ final class Store: ObservableObject {
     @Published var sessionNumbers: [String: Int] = [:]
     var speechQueue: [String] = []
     var replyTarget: (number: Int, armedAt: Date)?
+    var replyDirect: (item: ThreadItem, armedAt: Date)?   // "reply" after a message read on screen
+    var lastRead: ThreadItem?
+    var onScreen = Set<String>()
     var sends: [String: (item: String, number: Int, name: String, started: Date)] = [:]
     var handledDrops = Set<String>()
     var threadEvents = Set<String>()
@@ -430,7 +435,7 @@ final class Store: ObservableObject {
         case .openItem(let number): openRow(number)
         case .dismissItem(let number): dismissRow(number)
         case .cancel:
-            replyTarget = nil
+            replyTarget = nil; replyDirect = nil
             notice = "Message discarded."; heard = ""
             if let current = speaking, current.phase == "paused" { send("toggle", current) }
         case .open: if let s = selected { openChat(s) }
@@ -443,6 +448,10 @@ final class Store: ObservableObject {
             guard let s = validDestination(destination) else { return }
             send("abort", s, tracked: true)
         case .dictate(let message):
+            if let target = replyDirect {
+                replyDirect = nil
+                if !message.isEmpty, Date().timeIntervalSince(target.armedAt) < 90 { sendToThread(target.item, number: 0, text: message); return }
+            }
             if let target = replyTarget {   // "reply to number four", then the message
                 replyTarget = nil
                 if !message.isEmpty, Date().timeIntervalSince(target.armedAt) < 90 { reply(target.number, message); return }
@@ -792,6 +801,11 @@ struct Card: View {
             Toggle("Natural spoken rewrite", isOn: Binding(get: { store.settings.rewrite }, set: { v in store.update { $0.rewrite = v } }))
             Toggle("Show speech captions", isOn: Binding(get: { store.settings.captions }, set: { v in store.update { $0.captions = v } }))
             Toggle("Open selected chat", isOn: Binding(get: { store.settings.follow }, set: { v in store.update { $0.follow = v } }))
+            Picker("Reading mode", selection: Binding(get: { store.settings.mode }, set: { v in store.update { $0.mode = v }; store.stopAppSpeech() })) {
+                Text("Focus: only what is on screen").tag("focus")
+                Text("Headlines: short notices").tag("headlines")
+                Text("Everything: read it all").tag("everything")
+            }
             Toggle("Pause music while talking or listening", isOn: Binding(get: { store.settings.pauseMedia }, set: { v in store.update { $0.pauseMedia = v } }))
             Toggle("Read replies aloud", isOn: Binding(get: { store.settings.reading }, set: { v in store.update { $0.reading = v }; if !v { store.stopAppSpeech() }; if !v, let s = store.speaking { store.send("stop", s) } }))
             if handyInstalled() {

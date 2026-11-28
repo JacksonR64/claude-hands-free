@@ -81,3 +81,7 @@ For a Claude handoff prompt: “Read AGENTS.md, docs/HANDOFF.md, TASKS.md and do
 ## Window reader, 27 November 2026
 
 The panel starts `ReadAloudSend.app --watch` at launch (live mode only). `scanWindow()` in `mod/bin/Threads.swift` parses `claude-window.json` with `parseWindowMessages`. Limits: only the visible project chat and open thread are read; the Sender needs Accessibility again whenever `send.swift` changes, because the grant follows the ad hoc signature. Not yet tried by Jackson. The drop folder still works for threads that are not on screen.
+
+## Reading modes, 28 November 2026
+
+Jackson found reading everything back to back too much. `mode` now selects Focus (his setting), Headlines, or Everything; see `readOnScreen`, `shortNotice`, and `scanWindow` in `mod/bin/Threads.swift`. Still to build: an interrupt word during a long read ("wait"), a short reply, an end word, then resume from where it stopped. Media pausing is `tickMedia`/`mediaCommand` (MediaRemote through `/usr/bin/osascript`).

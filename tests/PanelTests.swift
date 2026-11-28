@@ -200,6 +200,8 @@ func panelSelfTests() {
         node(1, "AXGroup", "Fix export"), node(2, "AXGroup", "Threads"), node(3, "AXGroup", "Thread messages"),
         node(4, "AXGroup", "Message 1"), node(5, "AXHeading", "Claude responded: Working on it."), node(6, "AXStaticText", "", "Working on it."),
         node(1, "AXGroup", "Elsewhere"), node(2, "AXGroup", "Message 3"), node(3, "AXHeading", "Claude responded: ignored")])
+    assert(voiceIntent("reply") == .replyTo(0, "") && voiceIntent("okay claude reply to this") == .replyTo(0, ""), "A bare reply answers the message just read")
+    assert(headline("Both are done. The guide is here.") == "Both are done" && headline("No full stop") == "No full stop")
     let tabled = parseWindowMessages([
         node(1, "AXGroup", "Chat messages"), node(2, "AXGroup", "Message 1"), node(3, "AXHeading", "Claude responded: Done."), node(4, "AXStaticText", "", "Claude responded: Done."),
         node(5, "AXStaticText", "", "Done."), node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "State"), node(7, "AXStaticText", "", "Build"), node(7, "AXStaticText", "", "Yes"),
