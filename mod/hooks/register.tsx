@@ -68,7 +68,7 @@ let myTitle = ''
 let choices: { k: string; l: string }[] = []
 let progI = 0
 let progN = 0
-let settings = { rate: 0, rewrite: true, gap: 4, manual: false, follow: false, voice: false }
+let settings = { rate: 0, rewrite: true, gap: 4, manual: false, follow: false, voice: false, reading: true }
 let progText = ''
 let approved = false
 const DIR = '/tmp/read-aloud' // existing speech files; private session IPC lives in CONTROL
@@ -89,6 +89,11 @@ async function bridge($: any, operation: string, ...args: string[]) {
   const result = await $.process.run(['python3', `${$.plugin.root}/bin/bridge.py`, operation, ...args], { timeoutMs: operation === 'wait' ? 310000 : 10000 })
   if (result.exitCode !== 0) throw new Error(result.stderr || 'Conversation bridge failed')
   return result.stdout
+}
+
+// the panel holds a lock while it runs; with no panel nobody can answer by voice or click, so the host's own prompt must show
+async function controllerAlive($: any) {
+  try { return (await bridge($, 'alive')).trim() === '1' } catch { return false }
 }
 
 function displayName() { return myTitle || cwd.split('/').pop() || 'Claude session' }
@@ -208,7 +213,7 @@ async function loadSettings($: any) {
   const r = await $.process.run(['sh', '-c', 'cat "$HOME/.config/read-aloud/settings.json" 2>/dev/null']).catch(() => ({ stdout: '' }))
   try {
     const j = JSON.parse(r.stdout)
-    settings = { rate: Number(j.rate) || 0, rewrite: j.rewrite !== false, gap: Number(j.gap) > 0 ? Number(j.gap) : 4, manual: j.manual === true, follow: j.follow === true, voice: j.voice === true }
+    settings = { rate: Number(j.rate) || 0, rewrite: j.rewrite !== false, gap: Number(j.gap) > 0 ? Number(j.gap) : 4, manual: j.manual === true, follow: j.follow === true, voice: j.voice === true, reading: j.reading !== false }
   } catch {}
   cadence = settings.rewrite
 }
@@ -363,6 +368,9 @@ async function spoken($: any, raw: string, always: boolean) {
 
 // one item through the shared queue: lock, pause music, band, notification, log, speech
 async function speak($: any, source: string, name: string, text: string, mine: number, prefix: boolean) {
+  // The app is the master switch: no running app, or "Read replies aloud" off, means silence (Option+R still reads the clipboard)
+  await loadSettings($)
+  if (!(await controllerAlive($)) || (source !== 'clipboard' && !settings.reading)) return
   myName = name
   await setPhase($, 'queued')
   if (source === 'reply' && settings.manual) {
@@ -408,6 +416,7 @@ async function pollInbox($: any) {
   const sid = await $.session.id()
   const script = `o=/tmp/read-aloud-inbox.owner
 find "$o" -maxdepth 0 -mmin +1 -exec rm -rf {} \\; 2>/dev/null
+find ${INBOX} -type f -mmin +10 -delete 2>/dev/null
 mkdir "$o" 2>/dev/null && echo ${sid} > "$o/id"
 [ "$(cat "$o/id" 2>/dev/null)" = ${sid} ] || exit 2
 touch "$o"
@@ -416,7 +425,12 @@ for f in ${INBOX}/*; do [ -f "$f" ] || continue; t=/tmp/read-aloud-claim-$$; mv 
 exit 1`
   for (;;) {
     const r = await $.process.run(['sh', '-c', script]).catch(() => ({ exitCode: 2, stdout: '' }))
-    if (r.exitCode === 0 && r.stdout.trim()) await speak($, 'inbox', 'Main chat', await spoken($, r.stdout, false), gen, false)
+    if (r.exitCode === 0 && r.stdout.trim()) {
+      // an item may start with "@name: Thread title" (the cloud relay does), which is then read out first
+      const named = r.stdout.match(/^@name:\s*(.+)\n/)
+      const body = named ? r.stdout.slice(named[0].length) : r.stdout
+      await speak($, 'inbox', named ? named[1].trim() : 'Main chat', await spoken($, body, false), gen, !!named)
+    }
     await $.clock.sleep(r.exitCode === 2 ? 30000 : 2000)
   }
 }
@@ -445,7 +459,10 @@ export const register: Register = on => {
     await bindSession($)
     await ensureBar($)
     $.clock.every(400, () => { pollControl($) })
-    $.clock.every(2000, () => { publish($).catch(error => $.ui.log(String(error), { to: 'debug' })) })
+    $.clock.every(2000, () => {
+      publish($).catch(error => $.ui.log(String(error), { to: 'debug' }))
+      if (speaking || cur === 'queued') controllerAlive($).then(alive => { if (!alive) stopNow($, true) }).catch(() => {})   // quitting the app stops reading
+    })
     $.clock.every(30000, () => { findLocal($).then(() => publish($)).catch(() => {}) })
     watchKeys($).catch(error => $.ui.log(String(error), { to: 'debug' }))
     pollInbox($).catch(error => $.ui.log(String(error), { to: 'debug' }))
@@ -466,7 +483,7 @@ export const register: Register = on => {
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     await loadSettings($)
-    if (!settings.voice || e.agentId) return next(e)
+    if (!settings.voice || e.agentId || !(await controllerAlive($))) return next(e)
     const answers: Record<string, string> = {}
     for (const question of e.questions) {
       const request = { id: instance + '-q' + (++requestCount), kind: 'question', question: question.question,
@@ -479,7 +496,7 @@ export const register: Register = on => {
     const decision = await next(e)
     if (decision.decision) return decision
     await loadSettings($)
-    if (!settings.voice) return decision
+    if (!settings.voice || !(await controllerAlive($))) return decision
     const request = { id: instance + '-p' + (++requestCount), kind: 'permission', tool: e.tool_name,
       question: 'Allow this action once?', detail: JSON.stringify(e.tool_input) }
     const answer = await waitForAnswer($, request)
@@ -510,7 +527,8 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box>
-        <Text>{p === 'queued' ? 'Queued to read aloud ' : p === 'paused' ? `Paused: ${name} ` : `Reading: ${name} `}</Text>
+        <Text>{p === 'queued' ? (settings.manual ? 'Ready to read aloud ' : 'Queued to read aloud ') : p === 'paused' ? `Paused: ${name} ` : `Reading: ${name} `}</Text>
+        {p === 'queued' && settings.manual && <Button key="play" label="Read now" onPress={() => { approved = true }} />}
         {p !== 'queued' && <Button key="pause" label={p === 'paused' ? 'Resume' : 'Pause'} onPress={() => togglePause($)} />}
         <Button key="stop" label="Stop" onPress={() => stopNow($, true)} />
       </Box>

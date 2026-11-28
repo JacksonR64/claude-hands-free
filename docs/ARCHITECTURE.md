@@ -23,6 +23,8 @@ flowchart LR
 | `mod/bin/bar.swift` | Session list, presentation, selected destination, captions, demo state, microphone helper ownership and visible controls |
 | `mod/bin/VoiceCore.swift` | Parsing, unique-name matching, destination checks, presentation state, audio feedback and endpoint predicates |
 | `mod/bin/listen.swift` | Permission flow, raw audio capture, input levels, on-device recognition, playback gate and owner watchdog |
+| `mod/bin/Threads.swift` | Project-thread drop inbox, numbered waiting list, the app's own speech queue and the sender hand-off |
+| `mod/bin/send.swift` | Separate helper that types one reply into one project thread in the Claude desktop app after verifying the page and reply box |
 | `mod/bin/bridge.py` | Atomic files, private permissions, command/response validation, one-time consumption and expiry |
 | `mod/bin/session-info.py` | Local session title/identifier discovery |
 | `mod/bin/launch-panel.sh` | Respect Quit and avoid reopening an existing controller on session activity |

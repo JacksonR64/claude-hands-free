@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 enum PanelMode: String, CaseIterable {
     case menuBar, edge, floating
@@ -11,21 +12,78 @@ struct PanelPresentation {
     var expanded = false
     var hidden = false
     var lastInteraction: TimeInterval = 0
+    var hovered = false   // the pointer has been over it since it last opened
+    static let idleSeconds: TimeInterval = 2    // untouched: tuck away after this long
+    static let leaveSeconds: TimeInterval = 1   // after the pointer leaves: a short grace, then tuck away
     var seenEvents = Set<String>()
-    mutating func show(at now: TimeInterval) { hidden = false; expanded = true; lastInteraction = now }
+    mutating func show(at now: TimeInterval) { hidden = false; expanded = true; lastInteraction = now; hovered = false }
     mutating func hide() { hidden = true; expanded = false }
     mutating func collapse() { expanded = false }
     mutating func tick(events: Set<String>, now: TimeInterval, pointerInside: Bool, autoExpand: Bool, autoCollapse: Bool) {
         let fresh = events.subtracting(seenEvents)
         seenEvents = events
         if autoExpand && !hidden && !fresh.isEmpty { show(at: now) }
-        if pointerInside { lastInteraction = now }
-        if autoCollapse && expanded && !pointerInside && now - lastInteraction >= 8 { collapse() }
+        if pointerInside { lastInteraction = now; hovered = true }
+        if autoCollapse && expanded && !pointerInside && now - lastInteraction >= (hovered ? Self.leaveSeconds : Self.idleSeconds) { collapse() }
     }
 }
 
 enum VoiceIntent: Equatable {
-    case next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
+    case startDictation, next, previous, select(String), pause, resume, stopSpeech, stopWork, stopListening, readAgain, open, approve, deny, cancel, dictate(String)
+    // The numbered "waiting on you" list: project threads and sessions that need an answer.
+    case whoIsWaiting, replyTo(Int, String), readItem(Int), openItem(Int), dismissItem(Int)
+}
+
+let numberWords: [String: Int] = ["one": 1, "won": 1, "two": 2, "too": 2, "three": 3, "four": 4, "for": 4, "fore": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "ate": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5]
+func spokenNumber(_ word: String) -> Int? {
+    if let n = Int(word) { return n > 0 && n < 100 ? n : nil }
+    return numberWords[word]
+}
+
+// "reply to number four, yes go ahead" / "read number two" / "open 3" / "dismiss number one".
+// A reply keeps the speaker's own wording; anything that is not clearly a numbered command stays ordinary dictation.
+func numberedCommand(_ transcript: String, wake: String = "okay claude") -> VoiceIntent? {
+    let raw = transcript.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    var words: [(word: String, index: Int)] = []
+    for (index, token) in raw.enumerated() { for word in normalized(token).split(separator: " ") { words.append((String(word), index)) } }
+    var i = 0
+    func starts(_ phrase: String) -> Bool {
+        let parts = phrase.split(separator: " ").map(String.init)
+        return !parts.isEmpty && i + parts.count <= words.count && zip(parts, words[i...]).allSatisfy { $0 == $1.word }
+    }
+    func skip(_ phrases: [String]) -> Bool {
+        for phrase in phrases where starts(phrase) { i += phrase.split(separator: " ").count; return true }
+        return false
+    }
+    _ = skip([normalized(wake), "okay claude", "ok claude", "hey claude", "okay", "ok"])
+    while skip(["i ll", "i will", "i want to", "i d like to", "let me", "can you", "could you", "please", "and", "now"]) {}
+    guard i < words.count else { return nil }
+    let verb = words[i].word; i += 1
+    let replying = ["reply", "respond", "answer", "tell", "message"].contains(verb)
+    guard replying || ["read", "play", "open", "show", "dismiss", "clear", "skip"].contains(verb) else { return nil }
+    let hadTo = skip(["to"])
+    _ = skip(["the"])
+    let hadKeyword = skip(["number", "numbers", "thread", "item"])
+    guard i < words.count else { return nil }
+    guard let number = spokenNumber(words[i].word) ?? (hadKeyword && words[i].word == "to" ? 2 : nil) else { return nil }
+    let last = words[i].index; i += 1
+    if replying {
+        // "tell 5 people" is a message; "reply to four" and "tell number four" are commands
+        guard hadKeyword || (hadTo && ["reply", "respond"].contains(verb)) else { return nil }
+        var rest = Array(raw[(last + 1)...])
+        if let first = rest.first, normalized(first) == "saying" { rest.removeFirst() }
+        let text = rest.joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.:;!?-"))
+        return .replyTo(number, text)
+    }
+    guard i == words.count else { return nil }   // "read 3 files in the repo" is a message
+    switch verb {
+    case "read", "play": return .readItem(number)
+    case "open", "show": return .openItem(number)
+    default: return .dismissItem(number)
+    }
 }
 
 func normalized(_ text: String) -> String {
@@ -38,6 +96,7 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     let prefixes = [normalized(wake), "okay claude", "ok claude", "hey claude", "okay", "ok"]
     for prefix in prefixes where text.hasPrefix(prefix + " ") { text = String(text.dropFirst(prefix.count + 1)); break }
     switch text {
+    case "dictate", "start dictation", "take a message", "new message": return .startDictation
     case "next session", "next chat", "next conversation": return .next
     case "previous session", "previous chat", "previous conversation": return .previous
     case "pause", "pause speaking": return .pause
@@ -50,8 +109,14 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
     case "approve action", "allow action": return .approve
     case "deny action", "reject action": return .deny
     case "cancel message", "discard message": return .cancel
+    case "reply", "reply to this", "reply to that", "reply to it", "reply to this one": return .replyTo(0, "")
+    case "who s waiting", "who is waiting", "whos waiting", "what s waiting", "what is waiting", "who s waiting for me", "who is waiting for me",
+         "who s waiting on me", "who is waiting on me", "what s waiting on me", "what s waiting for me", "who needs me", "what needs me",
+         "waiting list", "list waiting", "anything waiting", "is anything waiting", "who needs a reply", "what needs my attention":
+        return .whoIsWaiting
     default: break
     }
+    if let command = numberedCommand(transcript, wake: wake) { return command }
     for prefix in ["switch to ", "move to ", "go to ", "select session "] where text.hasPrefix(prefix) {
         var name = String(text.dropFirst(prefix.count))
         if name.hasPrefix("the ") { name = String(name.dropFirst(4)) }
@@ -59,6 +124,59 @@ func voiceIntent(_ transcript: String, wake: String = "okay claude") -> VoiceInt
         if !name.isEmpty { return .select(name) }
     }
     return .dictate(transcript.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+// ---- Handy (https://github.com/cjpais/Handy): optional dictation engine. Its CLI starts/stops a recording and it
+// keeps every transcript in history.db, so the app can take the text itself instead of letting Handy paste it.
+let handyBinary = "/Applications/Handy.app/Contents/MacOS/Handy"
+var handySupport = NSHomeDirectory() + "/Library/Application Support/com.pais.handy"
+func handyInstalled() -> Bool { FileManager.default.isExecutableFile(atPath: handyBinary) }
+
+func handyQuery<T>(_ sql: String, _ read: (OpaquePointer) -> T?) -> T? {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(handySupport + "/history.db", &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let handle = db else { sqlite3_close(db); return nil }
+    defer { sqlite3_close(handle) }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(handle, sql, -1, &stmt, nil) == SQLITE_OK, let statement = stmt else { return nil }
+    defer { sqlite3_finalize(statement) }
+    return sqlite3_step(statement) == SQLITE_ROW ? read(statement) : nil
+}
+func handyLastID() -> Int64 { handyQuery("SELECT COALESCE(MAX(id), 0) FROM transcription_history") { sqlite3_column_int64($0, 0) } ?? 0 }
+// the newest transcript after `id` (the post-processed text when Handy made one)
+func handyTranscript(after id: Int64) -> (id: Int64, text: String)? {
+    handyQuery("SELECT id, COALESCE(NULLIF(post_processed_text, ''), transcription_text) FROM transcription_history WHERE id > \(id) ORDER BY id DESC LIMIT 1") { s in
+        guard let c = sqlite3_column_text(s, 1) else { return nil }
+        return (sqlite3_column_int64(s, 0), String(cString: c))
+    }
+}
+func handyPasteMethod() -> String? {
+    guard let d = FileManager.default.contents(atPath: handySupport + "/settings_store.json"),
+          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+    return ((j["settings"] as? [String: Any]) ?? j)["paste_method"] as? String
+}
+func handyRun(_ flag: String) {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: handyBinary); p.arguments = [flag]
+    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+    try? p.run()
+}
+
+func wakePrefixes(_ wake: String) -> [String] { [normalized(wake), "okay claude", "ok claude", "hey claude"] }
+
+// Dictation starts only when the utterance opens with the wake phrase; commands need no wake phrase.
+func startsWithWake(_ transcript: String, wake: String = "okay claude") -> Bool {
+    let text = normalized(transcript)
+    return wakePrefixes(wake).contains { !$0.isEmpty && (text == $0 || text.hasPrefix($0 + " ")) }
+}
+
+func withoutWake(_ transcript: String, wake: String = "okay claude") -> String {
+    let tokens = transcript.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    for prefix in wakePrefixes(wake) where !prefix.isEmpty {
+        let words = prefix.split(separator: " ").map(String.init)
+        if tokens.count >= words.count, zip(tokens, words).allSatisfy({ normalized($0.0) == $0.1 }) {
+            return tokens.dropFirst(words.count).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: " ,.:;!?-"))
+        }
+    }
+    return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 struct VoiceCandidate { let id: String; let names: [String] }

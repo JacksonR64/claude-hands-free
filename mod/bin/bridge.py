@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private, atomic IPC between the floating panel and each mod instance."""
+import fcntl
 import argparse
 import json
 import os
@@ -86,10 +87,26 @@ def wait_for_answer(root, session, instance, request, timeout):
     return {"error": "Voice response timed out"}
 
 
+def panel_alive(root):
+    """True while the controller panel holds its flock on panel.lock (it takes it at launch and keeps it until it exits)."""
+    try:
+        fd = os.open(root / "panel.lock", os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path.home() / ".cache/read-aloud/conversation")
-    parser.add_argument("operation", choices=["publish", "drain", "ack", "wait", "remove"])
+    parser.add_argument("operation", choices=["publish", "drain", "ack", "wait", "remove", "alive"])
     parser.add_argument("args", nargs="*")
     opts = parser.parse_args()
     root = opts.root
@@ -108,6 +125,8 @@ def main():
         receipt(root, json.loads(args[0]), args[1], args[2] if len(args) > 2 else "")
     elif opts.operation == "wait":
         print(json.dumps(wait_for_answer(root, key(args[0]), key(args[1]), key(args[2]), float(args[3]))))
+    elif opts.operation == "alive":
+        print("1" if panel_alive(root) else "0")
     elif opts.operation == "remove":
         path = root / ("s-" + key(args[0]) + ".json")
         value = read(path)

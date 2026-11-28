@@ -12,7 +12,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 TARGET = Path.home() / '.claude/mods/read-aloud'
 CACHE = Path.home() / '.cache/read-aloud'
 SETTINGS = Path.home() / '.config/read-aloud/settings.json'
-ARTIFACTS = ['read-aloud-bar', 'read-aloud-keys', 'ReadAloudListen.app', 'ReadAloudConversation.app', 'ReadAloudDemo.app', 'ReadAloudDemoListen.app']
+ARTIFACTS = ['read-aloud-bar', 'read-aloud-keys', 'ReadAloudListen.app', 'ReadAloudConversation.app', 'ReadAloudDemo.app', 'ReadAloudDemoListen.app', 'ReadAloudSend.app']
 
 
 def copy(source, target):
@@ -77,8 +77,8 @@ def main():
     backup = PROJECT / 'work/backups' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     backup.mkdir(parents=True, mode=0o700)
     applications = Path.home() / 'Applications'
-    links = {applications / 'Claude Conversation.app': CACHE / 'ReadAloudConversation.app',
-             applications / 'Claude Conversation Demo.app': CACHE / 'ReadAloudDemo.app'}
+    links = {applications / 'Claude Hands Free.app': CACHE / 'ReadAloudConversation.app',
+             applications / 'Claude Hands Free Demo.app': CACHE / 'ReadAloudDemo.app'}
     metadata = {'settingsExisted': SETTINGS.exists(), 'target': str(TARGET),
                 'applicationLinks': {str(k): str(v) for k, v in links.items() if not os.path.lexists(k)}}
     if TARGET.exists(): copy(TARGET, backup / 'mod')
@@ -107,7 +107,7 @@ def main():
     (PROJECT / 'work/last-backup.txt').write_text(str(backup))
     print('Installed local MVP. Microphone is off.')
     print('Backup:', backup)
-    print('Open ~/Applications/Claude Conversation.app. Reload the plugin in existing Claude Code sessions.')
+    print('Open ~/Applications/Claude Hands Free.app. Reload the plugin in existing Claude Code sessions.')
 
 
 if __name__ == '__main__':

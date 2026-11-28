@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 func panelSelfTests() {
     assert(demo, "Run tests with --demo to disable real IPC")
@@ -34,7 +35,37 @@ func panelSelfTests() {
     assert(visibility.expanded)
     visibility.tick(events: ["third"], now: 29, pointerInside: false, autoExpand: false, autoCollapse: true)
     assert(!visibility.expanded && !visibility.hidden)
+    visibility.show(at: 100)
+    visibility.tick(events: ["third"], now: 101, pointerInside: false, autoExpand: false, autoCollapse: true)
+    assert(visibility.expanded, "Untouched, it waits two seconds")
+    visibility.tick(events: ["third"], now: 102.1, pointerInside: false, autoExpand: false, autoCollapse: true)
+    assert(!visibility.expanded, "...then tucks away")
+    visibility.show(at: 200)
+    visibility.tick(events: ["third"], now: 200.5, pointerInside: true, autoExpand: false, autoCollapse: true)
+    visibility.tick(events: ["third"], now: 201, pointerInside: false, autoExpand: false, autoCollapse: true)
+    assert(visibility.expanded, "After hovering out it keeps a short grace")
+    visibility.tick(events: ["third"], now: 201.6, pointerInside: false, autoExpand: false, autoCollapse: true)
+    assert(!visibility.expanded, "...of about a second")
     assert(voiceDir != dir && voiceDir.hasSuffix("conversation-demo"), "Sandbox audio cannot enter the live transcript log")
+    assert(startsWithWake("Okay Claude, tell it hello") && !startsWithWake("tell it hello") && startsWithWake("okay claude"))
+    assert(withoutWake("Okay, Claude, tell it hello") == "tell it hello" && withoutWake("okay claude") == "")
+    assert(voiceIntent("next session") == .next, "Commands need no wake phrase")
+    assert(voiceIntent("okay Claude, dictate") == .startDictation && voiceIntent("start dictation") == .startDictation)
+    do {   // Handy's history database: newest transcript after a known id, post-processed text preferred
+        let tmp = NSTemporaryDirectory() + "handy-test-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        assert(sqlite3_open(tmp + "/history.db", &db) == SQLITE_OK)
+        sqlite3_exec(db, "CREATE TABLE transcription_history (id INTEGER PRIMARY KEY AUTOINCREMENT, file_name TEXT, timestamp INTEGER, saved BOOLEAN, title TEXT, transcription_text TEXT, post_processed_text TEXT, post_process_prompt TEXT, post_process_requested BOOLEAN);", nil, nil, nil)
+        sqlite3_close(db)
+        let saved = handySupport; handySupport = tmp; defer { handySupport = saved }
+        assert(handyLastID() == 0 && handyTranscript(after: 0) == nil)
+        sqlite3_open(tmp + "/history.db", &db)
+        sqlite3_exec(db, "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_requested) VALUES ('a', 1, 0, 't', 'first message', NULL, 0), ('b', 2, 0, 't', 'raw words', 'Cleaned words.', 0);", nil, nil, nil)
+        sqlite3_close(db)
+        assert(handyLastID() == 2)
+        assert(handyTranscript(after: 0)?.text == "Cleaned words." && handyTranscript(after: 1)?.id == 2 && handyTranscript(after: 2) == nil)
+    } catch { assertionFailure("\(error)") }
     assert(voiceIntent("stop listening") == .stopListening)
     assert(voiceIntent("read again") == .readAgain)
     assert(!shouldFinishSpeech(hasTranscript: false, unchangedFor: 10, quietFor: 10))
@@ -132,6 +163,75 @@ func panelSelfTests() {
     speak("read again")
     assert(interruptions == 1, "Speaker mode must keep playback gating enabled")
     assert(store.assistantCaption == spoken.last)
+    // The numbered waiting list: project threads and sessions that need an answer
+    assert(voiceIntent("who's waiting") == .whoIsWaiting && voiceIntent("Okay Claude, who is waiting for me?") == .whoIsWaiting)
+    assert(voiceIntent("Reply to number four, yes go ahead and merge it.") == .replyTo(4, "yes go ahead and merge it"))
+    assert(voiceIntent("I'll reply to number 4 this that and the other") == .replyTo(4, "this that and the other"))
+    assert(voiceIntent("reply to two") == .replyTo(2, "") && voiceIntent("reply to number to sounds good") == .replyTo(2, "sounds good"))
+    assert(voiceIntent("tell number three to carry on") == .replyTo(3, "to carry on"))
+    assert(voiceIntent("tell 5 people about it") == .dictate("tell 5 people about it"), "A message that mentions a number is still a message")
+    assert(voiceIntent("read number two") == .readItem(2) && voiceIntent("open 3") == .openItem(3) && voiceIntent("dismiss number one") == .dismissItem(1))
+    assert(voiceIntent("read 3 files in the repo") == .dictate("read 3 files in the repo"))
+    assert(voiceIntent("Clear to black") == .dictate("Clear to black") && voiceIntent("read again") == .readAgain)
+    let drop = parseDrop(Data(#"{"project":"Shop","project_id":"chan_01ABCDEFGH","thread":"Fix export","thread_id":"cmsg_01ABCDEFGH","text":"Shall I merge?","waiting":true}"#.utf8), now: 100)!
+    assert(drop.name == "Shop, Fix export" && drop.url?.absoluteString == "claude://code/project/chan_01ABCDEFGH?thread=cmsg_01ABCDEFGH")
+    assert(parseDrop(Data(#"{"project_id":"chan_../../x","text":"hi"}"#.utf8), now: 1) == nil, "Identifiers go into a link, so they must be plain")
+    assert(parseDrop(Data(#"{"project_id":"chan_01ABCDEFGH","thread_id":"cmsg_1&x=1","text":"hi"}"#.utf8), now: 1) == nil)
+    assert(parseDrop(Data(#"{"project_id":"chan_01ABCDEFGH","waiting":true}"#.utf8), now: 1) == nil, "Nothing to say and waiting is not a message")
+    var book = ThreadBook()
+    let firstItem = book.apply(drop)
+    var other = drop; other.threadID = "cmsg_01ZZZZZZZZ"
+    assert(firstItem.number == 1 && book.apply(other).number == 2)
+    book.clear(firstItem.id)
+    assert(book.waiting.map(\.number) == [2], "An answered thread must not renumber the others")
+    var third = drop; third.threadID = "cmsg_01YYYYYYYY"
+    assert(book.apply(third, alsoUsed: [1]).number == 3, "Sessions share the numbers")
+    other.text = "New question"
+    assert(book.apply(other).number == 2 && book.waiting.first?.text == "New question")
+    other.waiting = false
+    assert(book.apply(other).number == 0 && book.waiting.map(\.number) == [3])
+    assert(speakable("**Done** see [the PR](https://x.y/z) `code`") == "Done see the PR code")
+    func node(_ depth: Int, _ role: String, _ title: String = "", _ value: String = "") -> WindowNode { WindowNode(depth: depth, role: role, title: title, value: value) }
+    let window = parseWindowMessages([
+        node(1, "AXGroup", "Primary pane"), node(2, "AXGroup", "Chat messages"),
+        node(3, "AXGroup", "Message 7"), node(4, "AXHeading", "You said: Is it done?"), node(5, "AXStaticText", "", "You said: Is it done?"), node(5, "AXStaticText", "", "Is it done?"),
+        node(3, "AXGroup", "Message 8"), node(4, "AXHeading", "Claude responded: Yes."), node(5, "AXStaticText", "", "Claude responded: Yes."),
+        node(5, "AXStaticText", "", "Yes. Shall I"), node(5, "AXStaticText", "", "merge it?"), node(5, "AXButton", "Show message actions for Claude responded: Yes."), node(5, "AXStaticText", "", "2:33 AM"),
+        node(1, "AXGroup", "Fix export"), node(2, "AXGroup", "Threads"), node(3, "AXGroup", "Thread messages"),
+        node(4, "AXGroup", "Message 1"), node(5, "AXHeading", "Claude responded: Working on it."), node(6, "AXStaticText", "", "Working on it."),
+        node(1, "AXGroup", "Elsewhere"), node(2, "AXGroup", "Message 3"), node(3, "AXHeading", "Claude responded: ignored")])
+    assert(voiceIntent("reply") == .replyTo(0, "") && voiceIntent("okay claude reply to this") == .replyTo(0, ""), "A bare reply answers the message just read")
+    assert(headline("Both are done. The guide is here.") == "Both are done" && headline("No full stop") == "No full stop")
+    let tabled = parseWindowMessages([
+        node(1, "AXGroup", "Chat messages"), node(2, "AXGroup", "Message 1"), node(3, "AXHeading", "Claude responded: Done."), node(4, "AXStaticText", "", "Claude responded: Done."),
+        node(5, "AXStaticText", "", "Done."), node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "State"), node(7, "AXStaticText", "", "Build"), node(7, "AXStaticText", "", "Yes"),
+        node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "Build"), node(7, "AXStaticText", "", "State"), node(7, "AXStaticText", "", "Yes"), node(7, "AXStaticText", "", "Step"), node(7, "AXStaticText", "", "State"),
+        node(4, "AXStaticText", "", "Did you hear it?"), node(2, "AXToolbar", "Message actions"), node(4, "AXStaticText", "", "2m ago")])
+    assert(tabled.count == 1 && tabled[0].body == "Done. Step State Build Yes Did you hear it?", "A table is read once and the changing time is left out: \(tabled)")
+    assert(window.count == 3, "Only the project chat and the thread panel are read")
+    assert(!window[0].fromClaude && !window[0].inThread && window[0].body == "Is it done?")
+    assert(window[1].fromClaude && window[1].body == "Yes. Shall I merge it?", "Timestamps and the repeated heading are not part of the reply")
+    assert(window[2].inThread && window[2].threadTitle == "Fix export" && window[2].body == "Working on it.")
+    assert(looksLikeTimestamp("Nov 26, 10:41 PM") && looksLikeTimestamp("Friday, November 27, 2026") && !looksLikeTimestamp("At 2:33 AM we deploy"))
+    store.demoEvent("quiet")
+    store.book = ThreadBook(); store.book.apply(drop)
+    speak("who's waiting")
+    assert(spoken.last?.contains("1 waiting") == true && spoken.last?.contains("Shop, Fix export") == true)
+    speak("read number one")
+    assert(spoken.last?.contains("Shall I merge") == true)
+    speak("reply to number nine go ahead")
+    assert(spoken.last?.contains("no number 9") == true && store.book.waiting.count == 1)
+    speak("reply to number one")
+    assert(store.replyTarget?.number == 1 && store.book.waiting.count == 1)
+    speak("Yes, merge it")
+    assert(store.replyTarget == nil && store.book.waiting.isEmpty, "The next utterance answers the armed number")
+    store.book.apply(drop)
+    speak("Reply to number one, yes merge it")
+    assert(store.book.waiting.isEmpty && store.notice.contains("Nothing was sent"))
+    store.demoEvent("question"); store.refresh()
+    store.book.apply(drop, alsoUsed: Set(store.sessionNumbers.values))
+    assert(Set(store.waitingRows.map(\.number)) == [1, 2], "A session question and a thread share one list")
+    store.demoEvent("quiet"); store.refresh(); store.book = ThreadBook()
     var microphoneStopped = false
     store.voiceChanged = { microphoneStopped = true }
     store.settings.voice = true

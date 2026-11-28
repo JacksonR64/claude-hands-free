@@ -20,7 +20,11 @@ func emit(_ event: String, id: String? = nil, text: String? = nil) {
 }
 
 func playbackIsActive() -> Bool {
-    if demo { return FileManager.default.fileExists(atPath: playbackMarker) }
+    // The app's own speech (thread messages, the waiting list) is marked by a file; a marker left by a crash goes stale.
+    if let made = (try? FileManager.default.attributesOfItem(atPath: playbackMarker))?[.modificationDate] as? Date {
+        if demo || Date().timeIntervalSince(made) < 180 { return true }
+    }
+    if demo { return false }
     let files = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
     return files.filter { $0.hasPrefix("s-") && $0.hasSuffix(".json") }.contains { name in
         guard let data = FileManager.default.contents(atPath: root + "/" + name),
@@ -43,6 +47,25 @@ final class Listener {
     var task: SFSpeechRecognitionTask?
     var utterance: String?
     var transcript = ""
+    var carried = ""                    // earlier recogniser segments of this same utterance (a request lasts under a minute)
+    var pendingUntil: Date?              // set while the send countdown runs
+    var pendingStart = Date()
+    let sendDelay: Double = {            // seconds of silence before a dictated message is sent; ~/.config/read-aloud/settings.json "sendDelay"
+        let path = NSHomeDirectory() + "/.config/read-aloud/settings.json"
+        if let d = FileManager.default.contents(atPath: path), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let v = j["sendDelay"] as? Double { return max(0, min(30, v)) }
+        return 5
+    }()
+    // settings.json: "wake" (phrase) and "requireWake" (default true: dictation needs it; commands never do)
+    let settingsJSON: [String: Any] = {
+        let path = NSHomeDirectory() + "/.config/read-aloud/settings.json"
+        guard let d = FileManager.default.contents(atPath: path), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return j
+    }()
+    var wakeWord: String { (settingsJSON["wake"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "okay claude" }
+    var requireWake: Bool { !demo && (settingsJSON["requireWake"] as? Bool ?? true) }
+    var useHandy: Bool { (settingsJSON["dictation"] as? String) == "handy" }   // the app starts Handy instead of arming Apple dictation
+    var armedUntil = Date.distantPast    // "okay Claude" on its own: the next utterance is the message
+    var full: String { carried.isEmpty ? transcript : transcript.isEmpty ? carried : carried + " " + transcript }
     var lastChange = Date(), lastVoice = Date(), started = Date()
     var generation = 0
     var failures = 0
@@ -84,12 +107,13 @@ final class Listener {
                     }
                 }
             }
+            for marker in ["/cancel-utterance", "/send-now"] { try? FileManager.default.removeItem(atPath: root + marker) }
             engine.prepare(); try engine.start(); restart()
             timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
             emit("ready", text: "Listening on this Mac")
         } catch { emit("error", text: "Couldn't start microphone processing: \(error.localizedDescription)"); exit(3) }
     }
-    func restart() {
+    func restart(keep: Bool = false) {
         generation += 1
         let mine = generation
         task?.cancel()
@@ -101,7 +125,8 @@ final class Listener {
         requestLock.lock()
         request?.endAudio(); request = fresh
         requestLock.unlock()
-        started = Date(); utterance = nil; transcript = ""; lastChange = Date()
+        started = Date(); transcript = ""
+        if !keep { utterance = nil; carried = ""; pendingUntil = nil; lastChange = Date() }
         task = recognizer?.recognitionTask(with: fresh) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self = self, self.generation == mine, !self.mutedForPlayback,
@@ -111,9 +136,12 @@ final class Listener {
                     let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
                         if self.utterance == nil { self.utterance = UUID().uuidString; emit("begin", id: self.utterance) }
-                        if text != self.transcript { self.transcript = text; self.lastChange = Date(); emit("partial", id: self.utterance, text: text) }
+                        if text != self.transcript { self.transcript = text; self.lastChange = Date(); emit("partial", id: self.utterance, text: self.full) }
                     }
-                    if result.isFinal { self.finish(); return }
+                    if result.isFinal {   // the recogniser ended this segment: keep the words and carry on listening
+                        if self.utterance != nil { self.carried = self.full; self.restart(keep: true) } else { self.restart() }
+                        return
+                    }
                 }
                 if let error = error {
                     self.recognitionState = "retrying"
@@ -128,7 +156,12 @@ final class Listener {
         }
     }
     func finish() {
-        if let id = utterance, !transcript.isEmpty { emit("final", id: id, text: transcript) }
+        if let id = utterance, !full.isEmpty {
+            var out = full
+            if requireWake, case .dictate = voiceIntent(full, wake: wakeWord), startsWithWake(full, wake: wakeWord) { out = withoutWake(full, wake: wakeWord) }
+            emit("final", id: id, text: out)
+        }
+        armedUntil = .distantPast
         restart()
     }
     func tick() {
@@ -145,18 +178,71 @@ final class Listener {
                 mutedForPlayback = true; generation += 1; task?.cancel()
                 requestLock.lock(); request?.endAudio(); request = nil; requestLock.unlock()
                 if let id = utterance { emit("cancel", id: id) }
-                utterance = nil; transcript = ""
+                utterance = nil; transcript = ""; carried = ""; pendingUntil = nil
             }
             return
         }
         if mutedForPlayback { mutedForPlayback = false; restart(); return }
-        if shouldFinishSpeech(hasTranscript: utterance != nil, unchangedFor: Date().timeIntervalSince(lastChange), quietFor: Date().timeIntervalSince(lastVoice)) { finish() }
-        else if Date().timeIntervalSince(started) > 45 { if utterance != nil { finish() } else { restart() } }
+        let now = Date()
+        if let until = pendingUntil {   // countdown: more speech cancels it, the panel can cancel or send now
+            if lastChange > pendingStart { pendingUntil = nil; emit("resume", id: utterance) }
+            else if FileManager.default.fileExists(atPath: root + "/cancel-utterance") {
+                try? FileManager.default.removeItem(atPath: root + "/cancel-utterance")
+                if let id = utterance { emit("cancel", id: id) }
+                restart()
+            } else if now >= until || FileManager.default.fileExists(atPath: root + "/send-now") {
+                try? FileManager.default.removeItem(atPath: root + "/send-now")
+                finish()
+            }
+            return
+        }
+        if shouldFinishSpeech(hasTranscript: utterance != nil && !full.isEmpty, unchangedFor: now.timeIntervalSince(lastChange), quietFor: now.timeIntervalSince(lastVoice)) {
+            let intent = voiceIntent(full, wake: wakeWord)
+            if case .dictate = intent {
+                let addressed = startsWithWake(full, wake: wakeWord) || now < armedUntil
+                if requireWake && !addressed {   // not said to us: never sent
+                    emit("diagnostic", text: "Heard speech without “\(wakeWord)”. Say it first to dictate a message.")
+                    if let id = utterance { emit("cancel", id: id) }
+                    restart(); return
+                }
+                if requireWake && startsWithWake(full, wake: wakeWord) && withoutWake(full, wake: wakeWord).isEmpty {   // only the wake phrase
+                    armedUntil = now.addingTimeInterval(8)
+                    emit("diagnostic", text: "Listening for your message…")
+                    if let id = utterance { emit("cancel", id: id) }
+                    restart(); return
+                }
+                if sendDelay <= 0 { finish() }   // a message: the countdown runs
+                else {
+                    pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
+                    emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
+                }
+            } else if case .replyTo(_, let body) = intent {   // "reply to number four ...": a message for a numbered item
+                if body.isEmpty {   // just the number: the next utterance is the message
+                    finish(); armedUntil = now.addingTimeInterval(15)
+                } else if sendDelay <= 0 { finish() }
+                else {
+                    pendingStart = now; pendingUntil = now.addingTimeInterval(sendDelay)
+                    emit("pending", id: utterance, text: String(Int(pendingUntil!.timeIntervalSince1970 * 1000)))
+                }
+            } else if case .startDictation = intent, !useHandy {   // "okay Claude, dictate": the next utterance is the message
+                armedUntil = now.addingTimeInterval(8)
+                emit("diagnostic", text: "Listening for your message…")
+                if let id = utterance { emit("cancel", id: id) }
+                restart()
+            } else { finish() }   // commands are sent at once, with no countdown
+        } else if now.timeIntervalSince(started) > 45 {   // the recogniser caps a request at about a minute: carry the words over
+            if utterance != nil { carried = full; restart(keep: true) } else { restart() }
+        }
+
     }
 }
 
 @main struct ConversationListener {
     static func main() throws {
+        if CommandLine.arguments.contains("--status") {   // read-only: report the macOS permission state and exit
+            print("speech", SFSpeechRecognizer.authorizationStatus().rawValue, "microphone", AVCaptureDevice.authorizationStatus(for: .audio).rawValue, "(0 undecided, 3 allowed)")
+            return
+        }
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let lock = open(root + "/listener.lock", O_CREAT | O_RDWR, 0o600)
         guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else { return }
@@ -166,10 +252,18 @@ final class Listener {
         let listener = Listener()
         guard let pid = listener.ownerPID, kill(pid, 0) == 0 else { return }
 
+        // a menu-bar-style app is never frontmost, and macOS then does not show the permission prompt: come forward while asking
+        func foreground(_ on: Bool) {
+            app.setActivationPolicy(on ? .regular : .accessory)
+            if on { app.activate(ignoringOtherApps: true) }
+        }
+
         func authorizeMicrophone() {
             if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { listener.start(); return }
             emit("diagnostic", text: "Waiting for macOS Microphone permission…")
+            foreground(true)
             AVCaptureDevice.requestAccess(for: .audio) { allowed in
+                DispatchQueue.main.async { foreground(false) }
                 guard allowed else { emit("error", text: "Allow Microphone access for the conversation helper in macOS Privacy settings."); exit(3) }
                 DispatchQueue.main.async { listener.start() }
             }
@@ -178,7 +272,9 @@ final class Listener {
         DispatchQueue.main.async {
             if SFSpeechRecognizer.authorizationStatus() == .authorized { authorizeMicrophone(); return }
             emit("diagnostic", text: "Waiting for macOS Speech Recognition permission…")
+            foreground(true)
             SFSpeechRecognizer.requestAuthorization { status in
+                DispatchQueue.main.async { foreground(false) }
                 guard status == .authorized else { emit("error", text: "Allow Speech Recognition for the conversation helper in macOS Privacy settings."); exit(2) }
                 DispatchQueue.main.async { authorizeMicrophone() }
             }

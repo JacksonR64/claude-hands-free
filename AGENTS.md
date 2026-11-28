@@ -1,4 +1,4 @@
-# Claude Conversation
+# Claude Hands Free
 
 Personal macOS voice controller for existing Claude Code sessions, built on the read-aloud mod. Jackson authorized the MVP build on 25 October 2026 and public GitHub source publication on 27 October 2026.
 
@@ -13,3 +13,4 @@ Personal macOS voice controller for existing Claude Code sessions, built on the 
 - Keep the demo discoverable in the Dock and menu bar, with an obvious stop control. Hiding the demo stops its audio; microphone trials are bounded. Leave its microphone off after installs and recovery work unless Jackson explicitly starts another trial. Do not echo unscripted background speech aloud.
 - Both controllers start with microphone off. Preserve the single-controller lock, listener-owner watchdog, explicit stop controls and Dock recovery. Live Hide can keep an explicitly enabled microphone running; make that visible. Demo Hide stops it. Do not enable either microphone automatically for verification.
 - Default to a menu-bar icon. Floating and screen-edge presentations are optional; new activity must not override an explicit Hide or Quit. Keep a simulation mode usable without Claude credits, including real local microphone input and spoken replies. Isolate its transcripts and processes from live sessions.
+- Routine ops (LAN/Tailscale ssh, dev-branch git, local CI, restarting his own services) are pre-approved per the global AGENTS.md (2026-11-18). Prod deploys, pushes or merges to main, and anything destructive or outward-facing still need Jackson. Hidden background sessions (the worker, the mailbox session) never ask him in-session; they escalate instead (scripts/worker-rules.md, HF_WORKER_ESCALATE).

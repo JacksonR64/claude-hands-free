@@ -1,4 +1,4 @@
-# Claude Conversation
+# Claude Hands Free
 
 A personal macOS voice controller for existing Claude Code sessions. A menu-bar icon opens a panel showing which conversation receives your speech and which others are working or waiting for an answer.
 
@@ -36,7 +36,7 @@ The installer validates and compiles before replacing `~/.claude/mods/read-aloud
 
 If read-aloud was already loaded globally, run `/reload-plugins` in each Claude Code session you want to use. Otherwise load this project's `mod/` as a local plugin using a compatible host's `--plugin-dir` option. Only sessions that load the mod participate. A normal Claude/Projects chat is not a Code session and will not appear.
 
-Open `~/Applications/Claude Conversation.app` (a link to the built app in `~/.cache/read-aloud/`). It shows a window and has a waveform menu-bar icon. The microphone starts off each launch. Choose a session, then explicitly click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**, its embedded listener. Existing hotkeys still use the read-aloud Accessibility permission.
+Open `~/Applications/Claude Hands Free.app` (a link to the built app in `~/.cache/read-aloud/`). It shows a window and has a waveform menu-bar icon. The microphone starts off each launch. Choose a session, then explicitly click the microphone. macOS may ask for Microphone and Speech Recognition permission for **Read Aloud Conversation**, its embedded listener. Existing hotkeys still use the read-aloud Accessibility permission.
 
 **Stop listening** or **Cmd+.** stops capture and requests current speech to stop; **Quit** or **Cmd+Q** exits. Clicking the Dock icon recovers a visible window, including after a background launch. **… → Show in Dock** is on by default and can be disabled for menu-bar-only use.
 
@@ -54,7 +54,7 @@ The two compact presentations expand on click, optionally on hover, and collapse
 
 ## Test without Claude usage
 
-Open `~/Applications/Claude Conversation Demo.app` after installation. It has a Dock entry, a ladybird menu-bar icon and a visible window. Click its Dock icon to recover the window if menu-bar space is limited. The demo starts with its microphone off and idle collapse disabled. It uses separate UI preferences, fake sessions, and an isolated microphone helper. Real session IPC is disabled.
+Open `~/Applications/Claude Hands Free Demo.app` after installation. It has a Dock entry, a ladybird menu-bar icon and a visible window. Click its Dock icon to recover the window if menu-bar space is limited. The demo starts with its microphone off and idle collapse disabled. It uses separate UI preferences, fake sessions, and an isolated microphone helper. Real session IPC is disabled.
 
 Click its microphone once and accept macOS Microphone and Speech Recognition prompts for **Conversation Demo Microphone**, if shown. After recognition starts, the Mac introduces the first fake session and asks a question aloud. Answer **grey patches** or **clear to black**; wait for its acknowledgement, then say **next session** or **move to printers session**. Say **ask me a question**, **show an approval**, **finish work**, **reset demo**, or **all quiet** to simulate activity by voice. Say **read again** to hear the selected session, **approve action** or **deny action** for a simulated permission, and **stop demo**, **microphone off** or **stop listening** to end capture. Demo replies are generated locally with `say` and played as buffered audio with `afplay`; no model is called. Unscripted speech outside a pending question appears as captions without being repeated aloud.
 
@@ -93,6 +93,23 @@ python3 scripts/install.py --rollback "$(cat work/last-backup.txt)"
 ```
 
 Reload the plugin afterwards. Backups are local and may contain personal settings; do not publish `work/`.
+
+## Always-on background session (macOS)
+
+This is optional. It keeps one Claude Code session running in this folder, hidden in tmux, with Remote Control on. Other Claude Code sessions on the Mac can reach it with SendMessage, and you can watch or steer it from the Claude app. Its brief, `scripts/worker-brief.md`, tells it never to turn on a microphone and to ask before it installs, pushes or deletes anything.
+
+Prerequisites: the Claude Code CLI logged in on its own (check with `claude auth status`; run `claude` then `/login` if needed), and tmux (`brew install tmux`).
+
+```sh
+sh scripts/start-worker.sh          # start it once, now
+sh scripts/install-worker.sh        # or: start it now and at every login (per-user LaunchAgent)
+tmux attach -t hands-free           # watch it; detach with Ctrl-b d
+sh scripts/uninstall-worker.sh --stop   # remove the LaunchAgent and end the session
+```
+
+Settings go in environment variables or `~/.config/claude-hands-free/worker.env`. The variables are listed at the top of `scripts/start-worker.sh`. They cover the session name, the tmux name, the folder, the brief, and an extra brief file appended to it, which is where your own mailbox or routing instructions go. Because nobody watches the hidden session, it runs with `AskUserQuestion` disabled and `scripts/worker-rules.md` appended to its system prompt: anything that needs you goes out through `HF_WORKER_ESCALATE` (by default a note file in `~/.local/state/claude-hands-free/for-owner/`; set it to your own channel, such as a mailbox command). The log is `~/Library/Logs/claude-hands-free-worker.log`. Re-running the start script does nothing while the session is up.
+
+Folder trust: a hidden session can't answer Claude Code's "trust this folder?" prompt, so it would sit there unseen. Either open `claude` in this folder once and accept the prompt, or set `HF_WORKER_TRUST=1` so the start script marks the folder trusted in `~/.claude.json`. It backs that file up first. Check for a stuck prompt with `tmux capture-pane -p -t hands-free`.
 
 ## How it fits together
 

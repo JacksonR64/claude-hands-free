@@ -4,9 +4,11 @@
 <key>CFBundleIdentifier</key><string>local.read-aloud.conversation</string>
 <key>CFBundleExecutable</key><string>read-aloud-bar</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleName</key><string>Claude Conversation</string>
+<key>CFBundleName</key><string>Claude Hands Free</string>
 <key>CFBundleVersion</key><string>0.7.0</string>
 <key>CFBundleShortVersionString</key><string>0.7.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Listen to your voice commands while you have the microphone switched on. Recognition happens on this Mac.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Recognise your voice commands on this Mac while the microphone is switched on.</string>
 <key>LSUIElement</key><false/>
 </dict></plist>
